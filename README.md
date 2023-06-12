@@ -2,6 +2,7 @@
 
 ## Contents
 
+```
 └───thesis_project_f2
     │   README.md
     │   [1] spatial-interpolation-overview.Rmd
@@ -12,6 +13,7 @@
             ...
     └───Dispersion_model [6]
             ...
+```
 
 ## Description
 
