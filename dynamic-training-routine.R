@@ -31,45 +31,68 @@ loss_function <- function(rsme_old, rsme_new, power=1.09748732){
 }
 
 # Define the function used to dynamically train a single variation of a model
-dynamic_model_train <- function(rsme_calc_func, model_varient, base_weight = 0.0, loss_threshold = 0.0005, max_iterations = 20){
+dynamic_model.train <- function(func, opt, base_weight = 0.0, loss_threshold = FALSE, var_iteration = 0, max_iterations = 20){
   
   # Pre-calculate the first two RSME values.
-  old_rsme <- rsme_calc_func(0, model_varient)
-  new_rsme <- rsme_calc_func(loss_threshold, model_varient)
+  old_rsme <- func(base_weight + 0.001, opt)
+  new_rsme <- func(base_weight + 0.005, opt)
   
   # Pre-calculate the first loss_value
   loss_value <- loss_function(old_rsme, new_rsme)
   
   # Save states of pre-calculated values
-  best_fit_weight <- loss_value
+  new_weight <- base_weight + loss_value
+  
+  #print(c(old_rsme, new_rsme, loss_value, new_weight))
+  
+  training_results <- data.frame(matrix(ncol = 6, nrow = 0))
+  colnames(training_results) <- c("model_opt", "train_iteration", "old_rsme", "new_rsme", "loss_value", "weight")
+  #training_results[1,] <- c(var_iteration, 1, old_rsme, new_rsme, loss_value, new_weight)
+  
   old_rsme <- new_rsme
   
-  for( i in 0:max_iterations ){
-    new_rsme <- rsme_calc_func(best_fit_weight, model_varient)
+  for( i in 1:max_iterations ) {
+    new_rsme <- func(new_weight, opt)
     loss_value <- loss_function(old_rsme, new_rsme)
-    best_fit_weight <- best_fit_weight + loss_value
     
-    if(loss_value < loss_threshold){ return(base_weight + best_fit_weight) }
+    #print(c(old_rsme, new_rsme, loss_value))
+    
+    if( new_rsme > old_rsme ) { 
+      new_weight <- new_weight - loss_value 
+    } else {
+      new_weight <- new_weight + loss_value
+    }
+    
+    training_results[i,] <- c(var_iteration, i, old_rsme, new_rsme, loss_value, new_weight)
+    
+    if( (!isFALSE(loss_threshold)) & (loss_value < loss_threshold) ) { break }
     
     old_rsme <- new_rsme
   }
   
-  return(base_weight + best_fit_weight)
+  return(training_results)
   
 }
 
 
 # Define the function used to dynamically train a all variation of a model
-dynamic_model_train_vars <- function(rsme_calc_func, model_variants, base_weight = 0.0, loss_threshold = 0.0005, max_iterations = 20){
-  n <- length(model_variants)
-  best_fit_weights <- rep(0.01, n)
+dynamic_model.train_vars <- function(func, opts, base_weight = 0.0, loss_threshold = FALSE, max_iterations = 20){
+  n <- length(opts)
+  if (n < 1) { return(NULL) }
   
-  for (i in 1:n) {
-    model_variant <- model_variants[i]
-    best_fit_weights[i] <- dynamic_model_train(rsme_calc_func, model_variant, base_weight, loss_threshold, max_iterations)
+  # Pre-calculate first entry of opts
+  opt <- opts[1]
+  training_results <- dynamic_model.train(func, opt, base_weight, loss_threshold, 1, max_iterations)
+  
+  if (n > 1){
+    for (i in 2:n) {
+      opt <- opts[i]
+      training_result <- dynamic_model.train(func, opt, base_weight, loss_threshold, i, max_iterations)
+      training_results <- rbind(training_results, training_result)
+    }
   }
   
-  return(best_fit_weights)
+  return(training_results)
 }
 
 # Define the function used to calculate the RSME from residuals
@@ -150,7 +173,7 @@ mqrbf.calc_new_rsme <- function(weight, smoothing_factor = 78.234334){
   x_observations <- sf_observations$x
   y_observations <- sf_observations$y
   z_observations <- sf_observations$windspeed
-  training_weight <- mqrbf.base_weight + weight
+  training_weight <- weight
   
   n <- length(x_observations)
   residuals <- rep(0.01, n)
@@ -197,35 +220,31 @@ idw.calc_new_rsme <- function(weight, neighbors = 5){
   return( rmse(cv$residual) )
 }
 
-trend_surface.best_fit_weights <- dynamic_model_train_vars(
-  trend_surface.calc_new_rsme, 
-  c("windspeed ~ x + y", "windspeed ~ x + y + I(x^2) + (x * y) + I(y^2) + I(x^3) + (I(x^2) * y) + (x * I(y^2)) + I(y^3)")
+#training_results.trend_surface <- dynamic_model.train_vars(
+#  func = trend_surface.calc_new_rsme, 
+#  opts = c(
+#    "windspeed ~ x + y", 
+#    "windspeed ~ x + y + I(x^2) + (x * y) + I(y^2) + I(x^3) + (I(x^2) * y) + (x * I(y^2)) + I(y^3)"
+#  )
+#  ,loss_threshold = 0.0005
+#)
+
+# c(0.23442, 92.2432, 78.234334, 2.987829)
+
+training_results.mqrbf <- dynamic_model.train_vars(
+  func = mqrbf.calc_new_rsme,
+  opts = runif(5, min=0.5, max=100.0),
+  base_weight = mqrbf.base_weight
+  ,loss_threshold = 0.0005
 )
 
-mqrbf.best_fit_weights <- dynamic_model_train_vars(
-  mqrbf.calc_new_rsme,
-  runif(10, min = min(sf_observations$x), max = max(sf_observations$x)),
-  mqrbf.base_weight
-)
+#training_results.idw <- dynamic_model.train_vars(
+#  func = idw.calc_new_rsme, 
+#  opts = seq(5, 8, 1),
+#  base_weight = idw.base_weight
+#  ,loss_threshold = 0.0005
+#)
 
-idw.best_fit_weights <- dynamic_model_train_vars(
-  idw.calc_new_rsme,
-  seq(2, 8, 1),
-  idw.base_weight
-)
-
-
-
-#cat(sprintf(
-#"
-#  trend_surface [linear] = (1 / windspeed) + %f
-#  trend_surface [cubic] = (1 / windspeed) + %f
-#  MQ-RBF = %f
-#  IDW = %f
-#", 
-#  trend_surface.linear.best_fit_weight, trend_surface.cubic.best_fit_weight, 
-#  mqrbf.best_fit_weight, idw.best_fit_weight
-#))
 
 
 
