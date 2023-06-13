@@ -1,0 +1,802 @@
+---
+title: "Spatial Interpolation Overview"
+author: "Arsalan Anwari"
+date: "2023-06-05"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Thesis code
+
+## 1. Data preparation
+### 1.1 Load libraries 
+
+```{r load_libs, warning=FALSE}
+
+library(jsonlite) # used for windspeed data of knmi station
+library(sf) # used to load maps and manipulate spatial features
+
+library(ggplot2) # used to plot maps and other figures
+library(tidyverse) # used for piping functioality of data manupilation functions
+
+library(gstat) # used for interpolation and validation of idw and kriging models
+library(caret) # used for cross validation of other models
+
+```
+
+### 1.2 Load data
+
+```{r load_data}
+
+# load windspeed measurements
+df_knmi_windspeed <- read_json("data/knmi_winspeed_days_2017.json", simplifyVector = TRUE)
+df_knmi_station_coords <- read.csv( "data/knmi_weather_stations.csv", sep=";")
+
+crs_source <- readRDS("data/source_map_crs.rds") 
+sf_netherlands <- st_read("data/netherlands_reference_map.gpkg")
+
+```
+
+### 1.3 Clean windspeed data
+#### 1.3.1 Rename windspeed dataframe columns
+
+```{r rename_df_windspeed}
+
+df_knmi_windspeed <- df_knmi_windspeed %>% 
+  select(station_code, date, FG) %>%
+  rename(windspeed = FG)
+
+```
+
+#### 1.3.3 Find missing entries and na values
+
+```{r find_missing_stations}
+missing_rows_stations <- df_knmi_windspeed %>% 
+  group_by(station_code) %>%
+  summarise(n = n()) %>%
+  filter(n < 365) %>% 
+  select(station_code)
+  
+na_rows_stations <- df_knmi_windspeed %>% 
+  filter(is.na(windspeed)) %>%
+  select(station_code)
+  
+missing_knmi_stations <- unique(rbind(missing_rows_stations, na_rows_stations))
+  
+missing_knmi_stations
+```
+
+#### 1.3.3 filter out rows with missing entries
+
+```{r filter_df_windspeed}
+df_knmi_windspeed <- df_knmi_windspeed %>% 
+  filter(!(station_code %in% missing_knmi_stations$station_code))
+
+df_knmi_windspeed
+
+```
+
+### 1.4 Merge location data of `df_knmi_station_coords` with windspeed data of `df_knmi_windspeed` into new variable
+
+```{r merge_knmi_data}
+
+df_knmi_station_coords <- df_knmi_station_coords %>%
+  select(STN, LON, LAT, NAME) %>%
+  rename(station_code = STN, x=LON, y=LAT, station_name=NAME)
+
+df_knmi_stations <- merge(df_knmi_windspeed, df_knmi_station_coords, by = "station_code")
+
+df_knmi_stations
+
+```
+
+### 1.5 Fix datetime and restructure order of dataframe
+
+```{r clean_knmi_data}
+
+df_knmi_stations <- df_knmi_stations %>% 
+  mutate(date=strftime(date, "%d-%m-%Y")) %>%
+  mutate(date=as.Date(date, "%d-%m-%Y")) %>%
+  select(station_code, station_name, date, x, y, windspeed)
+
+```
+
+
+### 1.6 Aplly source CRS to reference map and create 5km2 grid
+
+```{r create_reference_grid}
+
+sf_netherlands <- sf_netherlands %>%
+  st_geometry() %>%
+  st_transform(crs_source)
+
+grid_spacing <- 5000
+
+gs_netherlands_grid <- sf_netherlands %>% 
+  st_make_grid(
+    square = TRUE, 
+    what = "polygons",           
+    cellsize = c(grid_spacing, grid_spacing)
+  )
+
+sf_netherlands_grid <- gs_netherlands_grid %>% st_sf()
+
+sf_netherlands_grid
+
+```
+
+### 1.7 Remove seatiles and other unneccesary tiles
+
+```{r reduce_reference_grid}
+
+sf_netherlands_grid <- sf_netherlands_grid %>%
+  mutate(cell_id = 1:length(lengths(gs_netherlands_grid))) # add cell ID
+
+sf_netherlands_grid$n_intersects <- lengths(
+  st_intersects(sf_netherlands_grid, sf_netherlands)
+)
+
+sf_netherlands_grid <- sf_netherlands_grid %>%
+  filter(n_intersects > 0) %>%
+  select(geometry, cell_id)
+  
+sf_netherlands_grid
+
+```
+
+### 1.8 Show map of grids
+
+```{r show_grid_map}
+
+ggplot() +
+  geom_sf(data = sf_netherlands, fill="white", col="black") +
+  geom_sf(data = sf_netherlands_grid, alpha=0.1) +
+  theme_bw()
+
+```
+
+
+## 2. Observation and receptor preparation
+### 2.1 Take single sample of knmi windspeed timeseries as observations
+
+```{r create_sf_observations}
+
+df_observations <- df_knmi_stations %>% 
+  filter(date == as.Date("2017-01-01")) %>% 
+  select(!date)
+
+sf_observations <- df_observations %>% 
+  st_as_sf(coords = c("x", "y")) %>%
+  st_set_crs(4326) %>% # WGS-84
+  st_transform(crs_source)
+  
+sf_observations
+df_observations
+
+```
+
+### 2.2 Find grid which intersect with observations. 
+```{r observation_receptor_instersect}
+
+sf_receptors <- sf_netherlands_grid
+sf_receptors$station_codes <- c(st_intersects(sf_netherlands_grid, sf_observations))
+
+```
+
+### 2.2.1 Create backup grid for plotting
+
+```{r create_netherlands_receptor_grid}
+
+sf_receptors_copy <- sf_netherlands_grid
+sf_receptors_copy$station_codes <- c(st_intersects(sf_netherlands_grid, sf_observations))
+sf_netherlands_receptor_grid <- sf_receptors_copy %>% filter(lengths(station_codes) == 0)
+
+sf_netherlands_receptor_grid
+
+```
+
+### 2.3 Apply found indexes of intersects with windspeed values.
+
+```{r apply_intersects}
+
+# R has a weird bug where using the mean() function over a flattend list of length 1 used  will take the mean of the entire data frame instead of the selection. 
+# Therefor two separate search operations are performed, the results combined # with each other and finally merged with the receptor array.
+
+single_intersects <- sf_receptors %>%
+  as.data.frame() %>%
+  select(cell_id, station_codes) %>%
+  filter(lengths(station_codes) == 1) %>%
+  mutate(windspeed = df_observations$windspeed[unlist(station_codes)]) %>%
+  select(cell_id, windspeed)
+
+multi_intersects <- sf_receptors %>%
+  as.data.frame() %>%
+  select(cell_id, station_codes) %>%
+  filter(lengths(station_codes) > 1) %>%
+  mutate(windspeed = mean(df_observations$windspeed[unlist(station_codes)])) %>%
+  select(cell_id, windspeed)
+
+all_intersects <- rbind(single_intersects, multi_intersects)
+
+sf_observations <- merge(sf_receptors, all_intersects, by="cell_id")
+
+```
+
+```{r show_intersection_results}
+
+sf_observations
+
+```
+
+### 2.4 Calculate the centroids of the receptors are use that as the geometry instead of polygons. 
+
+```{r calc_receptor_centroids}
+
+sf_receptors <- sf_receptors %>%
+  st_set_geometry(st_centroid(st_geometry(sf_receptors)))
+
+sf_observations <- sf_observations %>%
+  st_set_geometry(st_centroid(st_geometry(sf_observations)))
+
+```
+
+### 2.5 Set default value of 0 for receptor variables
+
+```{r set_receptor_variable_default}
+
+sf_receptors <- sf_receptors %>% mutate(windspeed = 0)
+
+```
+
+### 2.6 Remove observation cells from receptor grid
+
+```{r remove_obs_cells_from_receptor_grid}
+
+sf_receptors <- sf_receptors %>%
+  filter(lengths(station_codes) == 0)
+
+```
+
+
+### 2.7 Prepare and save data for other R scripts like dynamic model traning routine
+
+```{r split_sf_coords_to_df}
+
+df_receptors <- sf_receptors %>%
+  mutate(
+    x = st_coordinates(.)[,1],
+    y = st_coordinates(.)[,2]
+  ) %>% 
+  as.data.frame() %>%
+  select(cell_id, x, y, !geometry)
+
+df_observations <- sf_observations %>%
+  mutate(
+    x = st_coordinates(.)[,1],
+    y = st_coordinates(.)[,2]
+  ) %>% 
+  as.data.frame() %>%
+  select(cell_id, x, y, !geometry)
+
+```
+
+```{r save_data_for_dynamic_training}
+
+saveRDS(sf_observations, "data/dynamic-training-routine.rds")
+
+```
+
+
+## 3 Perform interpolation
+### 3.0 Helper functions
+
+```{r plot_observations}
+
+show_prediction_map <- function(observation_variables){
+  sf_netherlands_receptor_grid$windspeed <- 0
+  sf_netherlands_receptor_grid$windspeed <- observation_variables
+
+  map_plot <- ggplot() +
+    geom_sf(data = sf_netherlands_receptor_grid, aes(fill=windspeed))
+  
+  print(map_plot)
+}
+
+```
+
+
+```{r calc_nrmse}
+
+calc_rmse <- function(residuals) {
+  return(sqrt(sum((residuals)^2)/length(residuals)))
+}
+
+calc_nrmse <- function(rmse, observations){
+  max <- max(observations)
+  min <- min(observations)
+  return (1.0 - ( rmse / (max - min) ))
+}
+
+```
+
+
+
+### 3.1 Trend surface 
+#### 3.1.1 Train nth order trend models
+
+```{r trend_models_train}
+
+trend_surface.first_order.model <- lm(
+  formula = windspeed ~ x + y,
+  data = df_observations
+)
+
+trend_surface.third_order.model <- lm(
+  formula = windspeed ~ x + y + I(x^2) + (x * y) + I(y^2) + I(x^3) + (I(x^2) * y) + (x * I(y^2)) + I(y^3),
+  data = df_observations
+)
+
+```
+
+#### 3.1.2 Predict surface with models
+
+```{r trend_models_predict}
+
+trend_surface.first_order.preds <- as.data.frame(predict(trend_surface.first_order.model, df_receptors))
+trend_surface.third_order.preds <- as.data.frame(predict(trend_surface.third_order.model, df_receptors))
+
+
+
+```
+
+```{r trend_models_rename_predict}
+
+colnames(trend_surface.first_order.preds) <- c("windspeed")
+colnames(trend_surface.third_order.preds) <- c("windspeed")
+
+```
+
+#### 3.1.3 Show results in map
+
+```{r show_first_order_trend_map_results}
+
+show_prediction_map(trend_surface.first_order.preds$windspeed)
+
+```
+```{r show_third_order_trend_map_results}
+
+show_prediction_map(trend_surface.third_order.preds$windspeed)
+
+```
+
+
+#### 3.1.4 Validate results
+
+```{r perform_cv_on_trend_surface_models}
+
+trend_surface.first_order.model_cv <- train(
+  windspeed ~ x + y,
+  method = "lm",
+  data = df_observations,
+  trControl = trainControl(method = "LOOCV")
+)
+
+trend_surface.third_order.model_cv <- train(
+  windspeed ~ x + y + I(x^2) + (x * y) + I(y^2) + I(x^3) + (I(x^2) * y) + (x * I(y^2)) + I(y^3),
+  method = "lm",
+  data = df_observations,
+  trControl = trainControl(method = "LOOCV")
+)
+
+```
+
+```{r calc_rsme_trend_surface}
+
+trend_surface.first_order.results.rmse <- (trend_surface.first_order.model_cv$results$RMSE)
+
+trend_surface.first_order.results.nrmse <- calc_nrmse(
+  trend_surface.first_order.results.rmse, 
+  df_observations$windspeed
+)
+
+trend_surface.third_order.results.rmse <- (trend_surface.third_order.model_cv$results$RMSE)
+trend_surface.third_order.results.nrmse <- calc_nrmse(
+  trend_surface.third_order.results.rmse, 
+  df_observations$windspeed
+)
+
+print(sprintf(
+  "First order trend: rmse=%f nrmse=%f", 
+  trend_surface.first_order.results.rmse, 
+  trend_surface.first_order.results.nrmse
+))
+
+print(sprintf(
+  "Third order trend: rmse=%f nrmse=%f", 
+  trend_surface.third_order.results.rmse, 
+  trend_surface.third_order.results.nrmse
+))
+
+```
+
+
+### 3.2 Radial Basis function
+#### 3.2.1 Train MQ-RBF weights based on observations
+```{r define_mqrbf_weight_function}
+
+# Calculate RBF weights
+calc_mqrbf_alpha_weights <- function(x, y, z, eps) {
+  n <- length(x)
+  K <- matrix(0, n, n)
+  for (i in 1:n) {
+    for (j in 1:n) {
+      K[i,j] <- sqrt(1 + eps * ((sqrt((x[i]-x[j])^2 + (y[i]-y[j])^2))^2) ) 
+    }
+  }
+  alpha <- solve(K) %*% z
+  return(as.vector(alpha))
+}
+
+```
+
+```{r calc_mqrbf_weights}
+
+mqrbf.weights <- calc_mqrbf_alpha_weights(
+    df_observations$x, df_observations$y, 
+    df_observations$windspeed, 1.543523
+)
+
+head(mqrbf.weights)
+```
+
+
+#### 3.2.2 Predict surface with MQ-RBF model 
+
+```{r define_mqrbf_model}
+
+calc_mqrbf_distance <- function(r, c){
+  return ( sqrt( (r^2) + (c^2) ) )
+}
+
+calc_mqrbf_surface <- function(
+  x_receptors, y_receptors, 
+  x_observations, y_observations,
+  alpha_weights, smoothing_factor
+){
+  
+  n_i <- length(x_receptors)
+  n_j <- length(x_observations)
+  
+  # value of 0.05 is to ensure that a float is used and not int. 
+  # Values ({0.0 ... 0.009} == 0) in rep() function of R.
+  z <- rep(0.01, n_i)  
+  
+  for(i in 1:n_i) {
+    x_new <- x_receptors[i]
+    y_new <- y_receptors[i]
+    z_new <- 0
+    for(j in 1:n_j) {
+      weight_j <- alpha_weights[j]
+  
+      x_j <- x_observations[j]
+      y_j <- y_observations[j]
+  
+      r <- sqrt( ((x_j-x_new)^2) + ((y_j-y_new)^2) )
+      m_distance <- calc_mqrbf_distance(r, smoothing_factor)
+  
+      z_new <- z_new + (weight_j * m_distance)
+    }
+    z[i] <- z_new
+  }
+  
+  return(z)
+  
+}
+
+```
+
+```{r predict_mqrbf_surface}
+
+mqrbf.preds <- calc_mqrbf_surface(
+  df_receptors$x, df_receptors$y,
+  df_observations$x, df_observations$y,
+  mqrbf.weights, 0.234334
+)
+
+```
+
+#### 3.2.3 Show results in map
+
+```{r show_mqrbf_surface}
+
+show_prediction_map(mqrbf.preds)
+
+```
+
+
+
+#### 3.2.4 Validate results
+
+```{r define_mqrbf_cross_validation_method}
+
+calc_mqrbf_loocv_residuals <- function(
+    x_observations, y_observations, z_observations,
+    training_weight, smoothing_factor
+){
+  n <- length(x_observations)
+  residuals <- rep(0.01, n)
+  
+  for(i in 1:n) {
+    x_train <- x_observations[-i]
+    y_train <- y_observations[-i]
+    z_train <- z_observations[-i]
+    
+    x_new <- as.vector(x_observations[i])
+    y_new <- as.vector(y_observations[i])
+    
+    alpha_weights <- calc_mqrbf_alpha_weights(x_train, y_train, z_train, training_weight)
+    
+    z_new <- calc_mqrbf_surface(
+      x_new, y_new,
+      x_train, y_train,
+      alpha_weights, smoothing_factor
+    )
+    
+    residuals[i] <- (z_observations[i] - z_new)
+  }
+  
+  return(residuals)
+}
+
+```
+
+```{r calc_mqrbf_nrmse}
+
+mqrbf.cv.residuals <- calc_mqrbf_loocv_residuals(
+  df_observations$x, df_observations$y, df_observations$windspeed,
+  1.543523, 100.4248998
+)
+
+mqrbf.cv.rsme <- calc_rmse(mqrbf.cv.residuals)
+mqrbf.cv.nrsme <- calc_nrmse(mqrbf.cv.rsme, df_observations$windspeed)
+
+```
+
+```{r show_mqrbf_nrmse}
+
+print(sprintf(
+  "MQ-RBF [eps=1.543523, c=0.234334]: rmse=%f nrmse=%f", 
+  mqrbf.cv.rsme, 
+  mqrbf.cv.nrsme
+))
+
+```
+
+### 3.3 Inverse Distance weighted
+#### 3.3.1 Train idw model with `n_neighbors=5` and `idp=1.5`.
+
+```{r train_idw_model}
+
+idw_model.model <- gstat(
+  formula = windspeed ~ 1,
+  data = sf_observations,
+  nmax = 5,
+  set = list(idp = 1.5)
+)
+
+```
+
+#### 3.3.2 Predict surface with idw model
+
+```{r pred_idw_model}
+
+idw_model.preds <- as.data.frame(predict(idw_model.model, sf_receptors))
+
+```
+
+#### 3.3.3 Show results in map
+
+```{r results_idw_model}
+
+show_prediction_map(idw_model.preds$var1.pred)
+
+```
+
+#### 3.3.4 Validate results
+
+```{r validate_idw_model, echo=FALSE, results='hide', message=FALSE, warning=FALSE}
+
+# if nfolds = nrow(observations) than gstat.cv uses LOOCV by default
+idw_model.cv <- gstat.cv(idw_model.model, nfold = nrow(sf_observations)) 
+
+```
+
+```{r calc_nrmse_idw_model}
+
+idw_model.rsme <- calc_rmse(idw_model.cv$residual)
+idw_model.nrsme <- calc_nrmse(idw_model.rsme, sf_observations$windspeed)
+
+print(sprintf(
+  "IDW [n=5, idp=1.5]: rmse=%f nrmse=%f", 
+  idw_model.rsme, 
+  idw_model.nrsme
+))
+
+```
+
+
+### 3.4 Ordinary Kriging
+#### 3.4.1 Fit variogram model 
+```{r fit_ordinary_kriging_variogram, warning=FALSE}
+
+# Create variogram
+od_kriging.vgm <- variogram(windspeed ~ 1, data = sf_observations)
+
+# Fit spherical variogram model to calculate sill and range
+od_kriging.vgm.fit <- fit.variogram(od_kriging.vgm, vgm(348.342080, "Sph", 40943.119350))
+
+
+```
+
+#### 3.4.2 Train ordinary kriging model
+
+```{r train_universal_kriging_models}
+
+od_kriging.model <- gstat(
+  formula = windspeed ~ 1,
+  data = sf_observations,
+  nmax = 5,
+  model = od_kriging.vgm.fit
+)
+
+```
+
+
+#### 3.4.3 Predict surfaces with ordinary kriging models
+
+```{r pred_universal_kriging_surfaces}
+
+od_kriging.model.preds <- as.data.frame(predict(od_kriging.model, sf_receptors))
+
+```
+
+
+#### 3.4.4 Show predictions in map
+
+```{r show_ordinry_kriging_surfaces}
+
+show_prediction_map(od_kriging.model.preds$var1.pred)
+
+```
+
+- Results show little to no difference in range of values, therefor it can be assumed that impact of seasonal or anual mean on ordinary kriging is minimal. 
+
+#### 3.4.5 Validate results
+
+```{r validate_simple_kriging_model, echo=FALSE}
+
+od_kriging.cv <- gstat.cv(od_kriging.model, nfold = nrow(sf_observations))
+
+```
+
+```{r calc_nrmse_simple_kriging_model}
+
+od_kriging.rsme <- calc_rmse(od_kriging.cv$residual)
+od_kriging.nrsme <- calc_nrmse(od_kriging.rsme, sf_observations$windspeed)
+
+print(sprintf(
+  "Ordinary kriging [n=5, vgm=(348.342080, 'Sph', 40943.119350)]: rmse=%f nrmse=%f", 
+  od_kriging.rsme, 
+  od_kriging.nrsme
+))
+
+```
+
+
+### 3.5 Universal kriging
+#### 3.5.1 Fit variogram model for universal kriging
+
+```{r universal_kriging_model_prepare}
+
+sf_observations_u <- sf_observations %>%
+  mutate( 
+    x = st_coordinates(.)[,1],
+    y = st_coordinates(.)[,2]
+  )
+
+sf_receptors_u <- sf_receptors %>%
+  mutate( 
+    x = st_coordinates(.)[,1],
+    y = st_coordinates(.)[,2]
+  )
+```
+
+```{r fit_universal_kriging_variogram, warning=FALSE}
+
+# Create variogram
+u_kriging.vgm <- variogram(windspeed ~ x + y, data = sf_observations_u)
+
+# Fit spherical variogram model to calculate sill and range
+u_kriging.vgm.fit <- fit.variogram(u_kriging.vgm, vgm(292.1622, "Sph", 40943.12))
+
+```
+
+
+#### 3.5.2 Train universal kriging models
+
+```{r universal_kriging_model}
+
+u_kriging.model_linear <- gstat(
+  formula = windspeed ~ x + y,
+  data = sf_observations_u,
+  nmax = 5,
+  model = u_kriging.vgm.fit
+)
+
+u_kriging.model_cubic <- gstat(
+  formula = windspeed ~ abs(x + y + (x^2) + (x * y) + (y^2) + (x^3) + ((x^2) * y) + (x * (y^2)) + (y^3)),
+  data = sf_observations_u,
+  nmax = 5,
+  model = u_kriging.vgm.fit
+)
+
+```
+
+#### 3.5.3 Predict surface using universal kriging model
+
+```{r preds_universal_kriging}
+
+u_kriging.model_linear.preds <- as.data.frame(predict(u_kriging.model_linear, sf_receptors_u))
+u_kriging.model_cubic.preds <- as.data.frame(predict(u_kriging.model_cubic, sf_receptors_u))
+
+```
+
+#### 3.5.4 Show predictions in map
+
+```{r show_universal_kriging_surfaces}
+
+show_prediction_map(u_kriging.model_linear.preds$var1.pred)
+show_prediction_map(u_kriging.model_cubic.preds$var1.pred)
+
+```
+
+#### 3.5.5 Validate results
+
+```{r validate_universal_kriging}
+
+u_kriging.cv.linear <- gstat.cv(u_kriging.model_linear, nfold = nrow(sf_observations_u))
+u_kriging.cv.cubic <- gstat.cv(u_kriging.model_cubic, nfold = nrow(sf_observations_u))
+
+```
+
+```{r calc_nrsme_universal_kriging}
+
+u_kriging.rsme.linear <- calc_rmse(u_kriging.cv.linear$residual)
+u_kriging.rsme.cubic <- calc_rmse(u_kriging.cv.cubic$residual)
+
+u_kriging.nrsme.linear <- calc_nrmse(u_kriging.rsme.linear, sf_observations_u$windspeed)
+u_kriging.nrsme.cubic <- calc_nrmse(u_kriging.rsme.cubic, sf_observations_u$windspeed)
+
+print("Universal kriging [n=5, vgm=(292.1622, 'Sph', 40943.12)]")
+
+print(sprintf(
+  "[model='Linear']: rmse=%f nrmse=%f", 
+  u_kriging.rsme.linear, u_kriging.nrsme.linear
+))
+
+print(sprintf(
+  "[model='Cubic']: rmse=%f nrmse=%f", 
+  u_kriging.rsme.cubic, u_kriging.nrsme.cubic
+))
+
+
+```
+
+
+
+
+
+

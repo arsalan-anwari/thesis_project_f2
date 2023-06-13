@@ -5,19 +5,19 @@
 └───thesis_project_f2
     │   README.md
     │   [1] spatial-interpolation-overview.Rmd
-    │   [2] spatial-interpolation-model-training.R
+    │   [2] dynamic-training-routine.R
     │   [3] dispersion-model-extention.R
     │   [4] thesis-validation-overview.Rmd
-    └───Data [5]
+    └───data [5]
             ...
-    └───Dispersion_model [6]
+    └───dispersion_model [6]
             ...
 
 ## Description
 
 [1]: Contains the R markdown notebook explaining the methods and thinking process used for the different spatial interpolation methods. This notebook contains a complete overview of the steps but not the code used for training of the weights.
 
-[2]: Contains the R code for the dynamic training routine used to find ideal weights and storing the results. 
+[2]: Contains the R code for the dynamic training routine used to find ideal weights for the spatial interpolation models used and storing the results. 
 
 [3]: Contains the code extending the pesticide dispersion model to include each windspeed interpolation method individually and storing the results. 
 
