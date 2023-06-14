@@ -1,249 +1,386 @@
+# ====================== SIMULATION DATA LOAD (START) ======================
 
-# Load libraries 
-
-library(sf) # used to load maps and manipulate spatial features
-library(tidyverse) # used for piping functionality of data manipulation functions
-library(gstat) # used for interpolation and validation of idw and kriging models
-library(caret) # used for cross validation of other models
-
-# Set working directory
-setwd("C:/Users/arsal/Workspaces/thesis_project_f2")
-
-# Set random seed
-set.seed(73829)
-
-# Load data
-sf_observations <- readRDS("data/dynamic-training-routine.rds")
-
-# Split x and y coordinate from observations and receptors as separate columns
-sf_observations <- sf_observations %>%
-  mutate(
-    x = st_coordinates(.)[,1],
-    y = st_coordinates(.)[,2]
-  ) %>%
-  select(x, y, windspeed)
-
-# Define the function used to calculate training weights based on RSME gain/loss
-loss_function <- function(rsme_old, rsme_new, power=1.09748732){
-  rsme_diff <- abs(rsme_old - rsme_new)
-  rsme_loss <- -rsme_diff^power
-  return( abs(rsme_loss) )
-}
-
-# Define the function used to dynamically train a single variation of a model
-dynamic_model.train <- function(func, opt, base_weight = 0.0, loss_threshold = FALSE, var_iteration = 0, max_iterations = 20){
+  # Load libraries 
   
-  # Pre-calculate the first two RSME values.
-  old_rsme <- func(base_weight + 0.001, opt)
-  new_rsme <- func(base_weight + 0.005, opt)
+  library(sf) # used to load maps and manipulate spatial features
+  library(tidyverse) # used for piping functionality of data manipulation functions
+  library(gstat) # used for interpolation and validation of idw and kriging models
+  library(caret) # used for cross validation of other models
   
-  # Pre-calculate the first loss_value
-  loss_value <- loss_function(old_rsme, new_rsme)
+  # Set working directory
+  setwd("C:/Users/arsal/Workspaces/thesis_project_f2")
   
-  # Save states of pre-calculated values
-  new_weight <- base_weight + loss_value
+  # Set random seed
+  set.seed(73829)
   
-  #print(c(old_rsme, new_rsme, loss_value, new_weight))
+  # Load data
+  sf_observations <- readRDS("Data/dynamic-training-routine.rds")
   
-  training_results <- data.frame(matrix(ncol = 6, nrow = 0))
-  colnames(training_results) <- c("model_opt", "train_iteration", "old_rsme", "new_rsme", "loss_value", "weight")
-  #training_results[1,] <- c(var_iteration, 1, old_rsme, new_rsme, loss_value, new_weight)
+  # Split x and y coordinate from observations and receptors as separate columns
+  sf_observations <- sf_observations %>%
+    mutate(
+      x = st_coordinates(.)[,1],
+      y = st_coordinates(.)[,2]
+    ) %>%
+    select(x, y, windspeed)
   
-  old_rsme <- new_rsme
-  
-  for( i in 1:max_iterations ) {
-    new_rsme <- func(new_weight, opt)
-    loss_value <- loss_function(old_rsme, new_rsme)
-    
-    #print(c(old_rsme, new_rsme, loss_value))
-    
-    if( new_rsme > old_rsme ) { 
-      new_weight <- new_weight - loss_value 
-    } else {
-      new_weight <- new_weight + loss_value
-    }
-    
-    training_results[i,] <- c(var_iteration, i, old_rsme, new_rsme, loss_value, new_weight)
-    
-    if( (!isFALSE(loss_threshold)) & (loss_value < loss_threshold) ) { break }
-    
-    old_rsme <- new_rsme
-  }
-  
-  return(training_results)
-  
-}
+  nrows_observations <- nrow(sf_observations)
 
+# ====================== SIMULATION DATA LOAD (END) ======================
 
-# Define the function used to dynamically train a all variation of a model
-dynamic_model.train_vars <- function(func, opts, base_weight = 0.0, loss_threshold = FALSE, max_iterations = 20){
-  n <- length(opts)
-  if (n < 1) { return(NULL) }
+# ====================== SIMULATION SETTINGS (START) ======================
   
-  # Pre-calculate first entry of opts
-  opt <- opts[1]
-  training_results <- dynamic_model.train(func, opt, base_weight, loss_threshold, 1, max_iterations)
+  settings.loss_function.default_power <- 0.68732
   
-  if (n > 1){
-    for (i in 2:n) {
-      opt <- opts[i]
-      training_result <- dynamic_model.train(func, opt, base_weight, loss_threshold, i, max_iterations)
-      training_results <- rbind(training_results, training_result)
-    }
-  }
-  
-  return(training_results)
-}
-
-# Define the function used to calculate the RSME from residuals
-rmse <- function(residuals) {
-  return(sqrt(sum((residuals)^2)/length(residuals)))
-}
-
-# Define the functions and helper functions used to calculate the RSME for each model
-
-## Trend surface
-trend_surface.calc_new_rsme <- function(weight, formula = "windspeed ~ x + y"){
-  model_cv <- train(
-    as.formula(formula),
-    method = "lm",
-    data = sf_observations,
-    trControl = trainControl(method = "LOOCV"),
-    weights = (1 / windspeed) + weight
+  settings.model_opt.polynomial_formulas <- c(
+    "windspeed ~ x + y", 
+    "windspeed ~ x + y + I(x^2) + (x * y) + I(y^2) + I(x^3) + (I(x^2) * y) + (x * I(y^2)) + I(y^3)"
   )
   
-  return( model_cv$results$RMSE )
-}
-
-## MQ-RBF
-mqrbf.base_weight <- 1.0
-
-mqrbf.calc_alpha_weights <- function(x, y, z, eps) {
-  n <- length(x)
-  K <- matrix(0, n, n)
-  for (i in 1:n) {
-    for (j in 1:n) {
-      K[i,j] <- sqrt(1 + eps * ((sqrt((x[i]-x[j])^2 + (y[i]-y[j])^2))^2) ) 
+  settings.model_opt.mqrbf_smoothing_factors <- runif(5, min=0.5, max=100.0)
+  settings.model_opt.neighbors <- seq(5, 8, 1)
+  
+# ====================== SIMULATION SETTINGS (END) ======================
+  
+# ====================== SIMULATION HELPER FUNCTIONS (START) ======================
+  
+  # Define the function used to calculate training weights based on RMSE gain/loss
+  loss_function <- function(rmse_old, rmse_new, power=settings.loss_function.default_power){
+    rmse_diff <- abs(rmse_old - rmse_new)
+    rmse_loss <- -rmse_diff^power
+    return( abs(rmse_loss) )
+  }
+  
+  # Define the function used to calculate the RMSE from residuals
+  rmse <- function(residuals) {
+    return(sqrt(sum((residuals)^2)/length(residuals)))
+  }
+  
+  # Define weight functions
+  weight_func.one_base_sub_halve <- function(
+    old_weight, loss_value
+  ) {
+    if( isFALSE(old_weight) ){ return( 1.0 + loss_value )  }
+    
+    if( loss_value < 0.0 ){
+      weight_factor <- (abs(loss_value) / 2)
+      if (old_weight > weight_factor){ return( old_weight - weight_factor ) }
+      return (old_weight + weight_factor)
+    } else{
+      return( old_weight + loss_value ) 
     }
   }
-  alpha <- solve(K) %*% z
-  return(as.vector(alpha))
-}
-
-mqrbf.calc_distance <- function(r, c){
-  return ( sqrt( (r^2) + (c^2) ) )
-}
-
-mqrbf.predict <- function(
+  
+  weight_func.no_base_add_exp_sub_halve <- function(
+    old_weight, loss_value, exp = 1.67328
+  ) {
+    if( isFALSE(old_weight) ){ return( loss_value )  }
+    
+    if( loss_value < 0.0 ){
+      weight_factor <- (abs(loss_value) / 2)
+      if (old_weight > weight_factor){ return( old_weight - weight_factor ) }
+      return (old_weight + weight_factor)
+    } else{
+      return( old_weight + (loss_value^exp) ) 
+    }
+  }
+  
+  weight_func.rand_base_add_sub_inc <- function(
+    old_weights, loss_value, n_weights = nrows_observations, alpha = 0.08232
+  ){
+    if( isFALSE(old_weights) ){ return( runif(n_weights, 0+loss_value+alpha, 1-loss_value-alpha) )  }
+    
+    if( loss_value < 0.0 ){
+      lowest_weight <- min(old_weights)
+      if ((lowest_weight - loss_value) < 0.0){
+        return( old_weights - lowest_weight + alpha )
+      }
+      return( old_weights - lowest_weight )
+    } else{
+      return( old_weights + loss_value ) 
+    }
+  }
+  
+  weight_func.variogram_base_add_exp <- function(
+    old_vgm_weights, loss_value, sill_power = 100, range_power = 10000, exp = 1.327347
+  ) {
+    if( isFALSE(old_vgm_weights) ){ 
+      new_weight <- weight_func.no_base_add_exp_sub_halve(FALSE, loss_value, exp)
+      return( list(weight = new_weight, psill = new_weight * sill_power, range = new_weight * range_power) )
+    }
+    
+    new_weight <- weight_func.no_base_add_exp_sub_halve(old_vgm_weights$weight, loss_value, exp)
+    return( list(weight = new_weight, psill = new_weight * sill_power, range = new_weight * range_power) )
+  }
+  
+# ====================== SIMULATION HELPER FUNCTIONS (END) ======================  
+  
+# ====================== SIMULATION FUNCTIONS (START) ======================
+  
+  # Define the function used to dynamically train a single variation of a model
+  dynamic_model.train <- function(
+    model_opt, model_opt_id,
+    rmse_func, weight_func, 
+    loss_function_power = settings.loss_function.default_power, 
+    max_iterations = 20
+  ){
+    
+    # Pre-calculate the first two RSME values.
+    old_rsme <- rmse_func(weight_func(FALSE, 0.001), model_opt)
+    new_rsme <- rmse_func(weight_func(FALSE, 0.005), model_opt)
+    
+    # Pre-calculate the first loss_value
+    loss_value <- loss_function(old_rsme, new_rsme, loss_function_power)
+    
+    # Save states of pre-calculated values
+    weights <- weight_func(FALSE, loss_value)
+    
+    training_results <- data.frame(matrix(ncol = 6, nrow = 0))
+    colnames(training_results) <- c("model_opt", "train_iteration", "old_rsme", "new_rsme", "loss_value", "weights")
+    
+    old_rsme <- new_rsme
+    
+    for( i in 1:max_iterations ) {
+      new_rsme <- rmse_func(weights, model_opt)
+      loss_value <- loss_function(old_rsme, new_rsme, loss_function_power)
+      
+      if( new_rsme > old_rsme ) { 
+        weights <- weight_func(weights, -loss_value)
+      } else {
+        weights <- weight_func(weights, loss_value)
+      }
+      
+      training_results[i,] <- c(model_opt_id, i, old_rsme, new_rsme, loss_value, toString(weights))
+      old_rsme <- new_rsme
+    }
+    
+    return(training_results)
+    
+  }
+  
+  # Define the function used to dynamically train all variations of a model
+  dynamic_model.train_opts <- function(
+    model_opts,
+    rmse_func, weight_func, 
+    loss_function_power = settings.loss_function.default_power,
+    max_iterations = 20
+  ){
+    n_opts <- length(model_opts)
+    if (n_opts < 1) { return(NULL) }
+    
+    # Pre-calculate first entry of opts
+    model_opt <- model_opts[1]
+    
+    training_results <- dynamic_model.train(
+      model_opt, 1, 
+      rmse_func, weight_func,
+      loss_function_power,
+      max_iterations
+    )
+    
+    if (n_opts == 1){ return(training_results) }
+    
+    for (i in 2:n_opts) {
+      model_opt <- model_opts[i]
+      
+      training_result <- dynamic_model.train(
+        model_opt, i, 
+        rmse_func, weight_func,
+        loss_function_power,
+        max_iterations
+      )
+      
+      training_results <- rbind(training_results, training_result)
+    }
+    
+    return(training_results)
+  }
+  
+# ====================== SIMULATION FUNCTIONS (END) ======================
+  
+# ====================== SIMULATION MODEL HELPER FUNCTIONS (START) ======================  
+  
+  mqrbf.calc_alpha_weights <- function(x, y, z, eps) {
+    n <- length(x)
+    K <- matrix(0, n, n)
+    for (i in 1:n) {
+      for (j in 1:n) {
+        K[i,j] <- sqrt(1 + eps * ((sqrt((x[i]-x[j])^2 + (y[i]-y[j])^2))^2) ) 
+      }
+    }
+    alpha <- solve(K) %*% z
+    return(as.vector(alpha))
+  }
+  
+  mqrbf.calc_distance <- function(r, c){
+    return ( sqrt( (r^2) + (c^2) ) )
+  }
+  
+  mqrbf.predict <- function(
     x_receptors, y_receptors, 
     x_observations, y_observations,
     alpha_weights, smoothing_factor
-){
-  
-  n_i <- length(x_receptors)
-  n_j <- length(x_observations)
-  
-  # value of 0.05 is to ensure that a float is used and not int. 
-  # Values ({0.0 ... 0.009} == 0) in rep() function of R.
-  z <- rep(0.01, n_i)  
-  
-  for(i in 1:n_i) {
-    x_new <- x_receptors[i]
-    y_new <- y_receptors[i]
-    z_new <- 0
-    for(j in 1:n_j) {
-      weight_j <- alpha_weights[j]
-      
-      x_j <- x_observations[j]
-      y_j <- y_observations[j]
-      
-      r <- sqrt( ((x_j-x_new)^2) + ((y_j-y_new)^2) )
-      m_distance <- mqrbf.calc_distance(r, smoothing_factor)
-      
-      z_new <- z_new + (weight_j * m_distance)
+  ){
+    
+    n_i <- length(x_receptors)
+    n_j <- length(x_observations)
+    
+    # value of 0.05 is to ensure that a float is used and not int. 
+    # Values ({0.0 ... 0.009} == 0) in rep() function of R.
+    z <- rep(0.01, n_i)  
+    
+    for(i in 1:n_i) {
+      x_new <- x_receptors[i]
+      y_new <- y_receptors[i]
+      z_new <- 0
+      for(j in 1:n_j) {
+        weight_j <- alpha_weights[j]
+        
+        x_j <- x_observations[j]
+        y_j <- y_observations[j]
+        
+        r <- sqrt( ((x_j-x_new)^2) + ((y_j-y_new)^2) )
+        m_distance <- mqrbf.calc_distance(r, smoothing_factor)
+        
+        z_new <- z_new + (weight_j * m_distance)
+      }
+      z[i] <- z_new
     }
-    z[i] <- z_new
+    
+    return(z)
+    
   }
   
-  return(z)
+  od_kriging.vgm <- variogram(windspeed ~ 1, data = sf_observations)
+  od_kriging.vgm.fit <- fit.variogram(od_kriging.vgm, vgm("Sph"))
   
-}
+# ====================== SIMULATION MODEL HELPER FUNCTIONS (END) ======================  
+  
+# ====================== SIMULATION MODEL FUNCTIONS (START) ======================
 
-mqrbf.calc_new_rsme <- function(weight, smoothing_factor = 78.234334){
-  x_observations <- sf_observations$x
-  y_observations <- sf_observations$y
-  z_observations <- sf_observations$windspeed
-  training_weight <- weight
-  
-  n <- length(x_observations)
-  residuals <- rep(0.01, n)
-  
-  for(i in 1:n) {
-    x_train <- x_observations[-i]
-    y_train <- y_observations[-i]
-    z_train <- z_observations[-i]
+  rmse_func.trend_surface <- function(case_weight, formula = settings.model_opt.polynomial_formulas[1]){
     
-    x_new <- as.vector(x_observations[i])
-    y_new <- as.vector(y_observations[i])
-    
-    alpha_weights <- mqrbf.calc_alpha_weights(x_train, y_train, z_train, training_weight)
-    
-    z_new <- mqrbf.predict(
-      x_new, y_new,
-      x_train, y_train,
-      alpha_weights, smoothing_factor
+    model <- train(
+      as.formula(formula),
+      method = "lm",
+      data = sf_observations,
+      trControl = trainControl(method = "LOOCV"),
+      weights = (1 / windspeed) + case_weight
     )
     
-    residuals[i] <- (z_observations[i] - z_new)
+    return( model$results$RMSE )
+    
   }
   
-  return(rmse(residuals))
+  rmse_func.mqrbf <- function(alpha_seed, smoothing_factor = settings.model_opt.mqrbf_smoothing_factors[1]){
+    x_observations <- sf_observations$x
+    y_observations <- sf_observations$y
+    z_observations <- sf_observations$windspeed
+    
+    n <- length(x_observations)
+    residuals <- rep(0.01, n)
+    
+    for(i in 1:n) {
+      x_train <- x_observations[-i]
+      y_train <- y_observations[-i]
+      z_train <- z_observations[-i]
+      
+      x_new <- as.vector(x_observations[i])
+      y_new <- as.vector(y_observations[i])
+      
+      alpha_weights <- mqrbf.calc_alpha_weights(x_train, y_train, z_train, alpha_seed)
+      
+      z_new <- mqrbf.predict(
+        x_new, y_new,
+        x_train, y_train,
+        alpha_weights, smoothing_factor
+      )
+      
+      residuals[i] <- (z_observations[i] - z_new)
+    }
+    
+    return(rmse(residuals))
+    
+  }
   
-}
-
-
-## IDW
-idw.base_weight <- 1.0
-
-idw.calc_new_rsme <- function(weight, neighbors = 5){
-  idp_weight <- idw.base_weight + weight
+  rmse_func.idw <- function(idp_power, neighbors = settings.model_opt.neighbors[1]){
+    
+    model <- gstat(
+      formula = windspeed ~ 1,
+      data = sf_observations,
+      nmax = neighbors,
+      set = list(idp = idp_power)
+    )
+    
+    { sink(nullfile()); cv <- gstat.cv(model, nfold = nrow(sf_observations), verbose=FALSE); sink(); }
+    
+    return( rmse(cv$residual) )
+  }
   
-  model <- gstat(
-    formula = windspeed ~ 1,
-    data = sf_observations,
-    nmax = neighbors,
-    set = list(idp = idp_weight)
+  rmse_func.od_kriging <- function(vgm_weights, neighbors = settings.model_opt.neighbors[1]){
+    
+    base_psill <-  od_kriging.vgm.fit$psill[1]
+    base_range <- od_kriging.vgm.fit$range[2]
+    new_sill <- base_psill + vgm_weights$psill
+    new_range <- base_range + vgm_weights$range
+    
+
+    vgm_model <- suppressWarnings(fit.variogram(
+      od_kriging.vgm, 
+      vgm(
+        psill = new_sill, 
+        model = "Sph", 
+        range = new_range
+      )
+    ))
+    
+    model <- suppressWarnings(gstat(
+      formula = windspeed ~ 1,
+      data = sf_observations,
+      nmax = neighbors,
+      model = vgm_model,
+    ))
+      
+    { sink(nullfile()); cv <- gstat.cv(model, nfold = nrow(sf_observations), verbose=FALSE); sink(); }
+    
+    return( rmse(cv$residual) )
+  }
+
+# ====================== SIMULATION MODEL FUNCTIONS (END) ======================
+
+# ====================== SIMULATION DATA SAVE (START) ======================
+
+  # Calculate training results for each model. 
+  training_results.trend_surface <- dynamic_model.train_opts(
+    model_opts = settings.model_opt.polynomial_formulas,
+    rmse_func = rmse_func.trend_surface,
+    weight_func = weight_func.no_base_add_exp_sub_halve,
+    max_iterations = 10
   )
   
-  { sink(nullfile()); cv <- gstat.cv(model, nfold = nrow(sf_observations), verbose=FALSE); sink(); }
+  training_results.mqrbf <- dynamic_model.train_opts(
+    model_opts = settings.model_opt.mqrbf_smoothing_factors,
+    rmse_func = rmse_func.mqrbf,
+    weight_func = weight_func.one_base_sub_halve,
+    max_iterations = 10
+  )
+
+  training_results.idw <- dynamic_model.train_opts(
+   model_opts = settings.model_opt.neighbors,
+   rmse_func = rmse_func.idw,
+   weight_func = weight_func.one_base_sub_halve,
+   max_iterations = 10
+  )
   
-  return( rmse(cv$residual) )
-}
+  training_results.od_kriging <- dynamic_model.train_opts(
+    model_opts = settings.model_opt.neighbors,
+    rmse_func = rmse_func.od_kriging,
+    weight_func = weight_func.variogram_base_add_exp,
+    max_iterations = 5
+  )
 
-#training_results.trend_surface <- dynamic_model.train_vars(
-#  func = trend_surface.calc_new_rsme, 
-#  opts = c(
-#    "windspeed ~ x + y", 
-#    "windspeed ~ x + y + I(x^2) + (x * y) + I(y^2) + I(x^3) + (I(x^2) * y) + (x * I(y^2)) + I(y^3)"
-#  )
-#  ,loss_threshold = 0.0005
-#)
+# ====================== SIMULATION DATA SAVE (END) ======================
 
-# c(0.23442, 92.2432, 78.234334, 2.987829)
-
-training_results.mqrbf <- dynamic_model.train_vars(
-  func = mqrbf.calc_new_rsme,
-  opts = runif(5, min=0.5, max=100.0),
-  base_weight = mqrbf.base_weight
-  ,loss_threshold = 0.0005
-)
-
-#training_results.idw <- dynamic_model.train_vars(
-#  func = idw.calc_new_rsme, 
-#  opts = seq(5, 8, 1),
-#  base_weight = idw.base_weight
-#  ,loss_threshold = 0.0005
-#)
 
 
 

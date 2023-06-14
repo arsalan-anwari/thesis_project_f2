@@ -32,11 +32,11 @@ library(caret) # used for cross validation of other models
 ```{r load_data}
 
 # load windspeed measurements
-df_knmi_windspeed <- read_json("data/knmi_winspeed_days_2017.json", simplifyVector = TRUE)
-df_knmi_station_coords <- read.csv( "data/knmi_weather_stations.csv", sep=";")
+df_knmi_windspeed <- read_json("Data/knmi_winspeed_days_2017.json", simplifyVector = TRUE)
+df_knmi_station_coords <- read.csv( "Data/knmi_weather_stations.csv", sep=";")
 
-crs_source <- readRDS("data/source_map_crs.rds") 
-sf_netherlands <- st_read("data/netherlands_reference_map.gpkg")
+crs_source <- readRDS("Data/source_map_crs.rds") 
+sf_netherlands <- st_read("Data/netherlands_reference_map.gpkg")
 
 ```
 
@@ -643,7 +643,7 @@ od_kriging.vgm.fit <- fit.variogram(od_kriging.vgm, vgm(348.342080, "Sph", 40943
 
 #### 3.4.2 Train ordinary kriging model
 
-```{r train_universal_kriging_models}
+```{r train_ordinary_kriging_models}
 
 od_kriging.model <- gstat(
   formula = windspeed ~ 1,
