@@ -9,9 +9,9 @@
     │   [2] dynamic-training-routine.R
     │   [3] dispersion-model-extention.R
     │   [4] thesis-validation-overview.Rmd
-    └───data [5]
+    └───Data [5]
             ...
-    └───dispersion_model [6]
+    └───Dispersion_model [6]
             ...
 ```
 
