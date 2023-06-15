@@ -285,7 +285,7 @@ df_observations <- sf_observations %>%
 
 ```{r save_data_for_dynamic_training}
 
-saveRDS(sf_observations, "data/dynamic-training-routine.rds")
+saveRDS(sf_observations, "Data/knmi_windspeed_observations.rds")
 
 ```
 

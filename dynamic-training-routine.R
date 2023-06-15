@@ -14,7 +14,7 @@
   set.seed(73829)
   
   # Load data
-  sf_observations <- readRDS("Data/dynamic-training-routine.rds")
+  sf_observations <- readRDS("Data/knmi_windspeed_observations.rds")
   
   # Split x and y coordinate from observations and receptors as separate columns
   sf_observations <- sf_observations %>%
@@ -143,6 +143,7 @@
   dynamic_model.train <- function(
     model_opt, model_opt_id,
     rmse_func, weight_func, weight_func_opts = FALSE,
+    loss_value_threshold = FALSE, 
     loss_function_power = settings.loss_function.default_power, 
     max_iterations = 20
   ){
@@ -174,6 +175,8 @@
       
       training_results[i,] <- c(model_opt_id, i, old_rsme, new_rsme, loss_value, toString(weights))
       old_rsme <- new_rsme
+      
+      if(!isFALSE(loss_value_threshold) & loss_value < loss_value_threshold) { break }
     }
     
     return(training_results)
@@ -184,6 +187,7 @@
   dynamic_model.train_opts <- function(
     model_opts,
     rmse_func, weight_func, weight_func_opts = FALSE,
+    loss_value_threshold = FALSE, 
     loss_function_power = settings.loss_function.default_power,
     max_iterations = 20
   ){
@@ -196,6 +200,7 @@
     training_results <- dynamic_model.train(
       model_opt, 1, 
       rmse_func, weight_func, weight_func_opts,
+      loss_value_threshold,
       loss_function_power, max_iterations
     )
     
@@ -207,6 +212,7 @@
       training_result <- dynamic_model.train(
         model_opt, i, 
         rmse_func, weight_func, weight_func_opts,
+        loss_value_threshold,
         loss_function_power, max_iterations
       )
       
@@ -402,50 +408,74 @@
 
 # ====================== SIMULATION MODEL FUNCTIONS (END) ======================
 
-# ====================== SIMULATION DATA SAVE (START) ======================
+# ====================== SIMULATION DATA GENERATE (START) ======================
 
-  # Calculate training results for each model. 
-  # training_results.trend_surface <- dynamic_model.train_opts(
-  #   model_opts = settings.model_opt.polynomial_formulas,
-  #   rmse_func = rmse_func.trend_surface,
-  #   weight_func = weight_func.no_base_add_exp_sub_halve,
-  #   max_iterations = 10
-  # )
-  # 
-  # training_results.mqrbf <- dynamic_model.train_opts(
-  #   model_opts = settings.model_opt.mqrbf_smoothing_factors,
-  #   rmse_func = rmse_func.mqrbf,
-  #   weight_func = weight_func.one_base_sub_halve,
-  #   max_iterations = 10
-  # )
-  # 
-  # training_results.idw <- dynamic_model.train_opts(
-  #  model_opts = settings.model_opt.neighbors,
-  #  rmse_func = rmse_func.idw,
-  #  weight_func = weight_func.one_base_sub_halve,
-  #  max_iterations = 10
-  # )
+  training_results.trend_surface <- dynamic_model.train_opts(
+    model_opts = settings.model_opt.polynomial_formulas[c(1,2)],
+    rmse_func = rmse_func.trend_surface,
+    weight_func = weight_func.no_base_add_exp_sub_halve,
+    max_iterations = 25
+  )
+   
+  training_results.mqrbf <- dynamic_model.train_opts(
+    model_opts = settings.model_opt.mqrbf_smoothing_factors,
+    rmse_func = rmse_func.mqrbf,
+    weight_func = weight_func.one_base_sub_halve,
+    max_iterations = 25
+  )
+
+  training_results.idw <- dynamic_model.train_opts(
+   model_opts = settings.model_opt.neighbors,
+   rmse_func = rmse_func.idw,
+   weight_func = weight_func.one_base_sub_halve,
+   max_iterations = 25
+  )
   
   training_results.od_kriging <- dynamic_model.train_opts(
-    model_opts = settings.model_opt.neighbors[c(1)],
+    model_opts = settings.model_opt.neighbors,
     rmse_func = rmse_func.od_kriging,
     weight_func = weight_func.variogram_base_add_exp,
     weight_func_opts = list( sill_power = 100, range_power = 10000, exp=1.527347 ),
-    max_iterations = 5
+    max_iterations = 25
   )
   
   training_results.u_kriging <- dynamic_model.train_opts(
     model_opts = list(
       c(5, settings.model_opt.polynomial_formulas[1]),
-      c(5, settings.model_opt.polynomial_formulas[3])
+      c(5, settings.model_opt.polynomial_formulas[3]),
+      c(6, settings.model_opt.polynomial_formulas[1]),
+      c(6, settings.model_opt.polynomial_formulas[3]),
+      c(7, settings.model_opt.polynomial_formulas[1]),
+      c(7, settings.model_opt.polynomial_formulas[3])
     ),
     rmse_func = rmse_func.u_kriging,
     weight_func = weight_func.variogram_base_add_exp,
     weight_func_opts = list( sill_power = 1000, range_power = 100000, exp=1.527347 ),
-    max_iterations = 5
+    max_iterations = 25
   )
   
+# ====================== SIMULATION DATA GENERATE (END) ======================
 
+# ====================== SIMULATION DATA SAVE (END) ======================  
+  
+  save.training_results <- list(
+    trend_surface = training_results.trend_surface,
+    mqrbf = training_results.mqrbf,
+    idw = training_results.idw,
+    od_kriging = training_results.od_kriging,
+    u_kriging = training_results.u_kriging
+  )
+  
+  save.settings <- list(
+    loss_function_power = settings.loss_function.default_power,
+    mqrbf_smoothing_factor = settings.model_opt.mqrbf_smoothing_factors,
+    neighbor_range = settings.model_opt.neighbors,
+    regression_models = settings.model_opt.polynomial_formulas
+  )
+  
+  saveRDS(save.training_results, "Data/dynamic_training_routine_training_results.rds")
+  saveRDS(save.settings, "Data/dynamic_training_routine_training_settings.rds")
+    
 # ====================== SIMULATION DATA SAVE (END) ======================
 
 
