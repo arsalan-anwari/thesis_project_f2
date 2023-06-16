@@ -9,25 +9,30 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-# Thesis code
 
-## 1. Data preparation
-### 1.1 Load libraries 
+
+# 1. Data preparation
+## 1.1 Load libraries 
 
 ```{r load_libs, warning=FALSE}
 
-library(jsonlite) # used for windspeed data of knmi station
+library(jsonlite) # used for wind speed data of knmi station
 library(sf) # used to load maps and manipulate spatial features
 
 library(ggplot2) # used to plot maps and other figures
-library(tidyverse) # used for piping functioality of data manupilation functions
+library(tidyverse) # used for piping functionality of data manipulation functions
 
-library(gstat) # used for interpolation and validation of idw and kriging models
+# Used to fix conflicted packages of dplyr
+library(conflicted)
+conflict_prefer("filter", "dplyr")
+conflict_prefer("lag", "dplyr")
+
+library(gstat) # used for interpolation and validation of IDW and kriging models
 library(caret) # used for cross validation of other models
 
 ```
 
-### 1.2 Load data
+## 1.2 Load data
 
 ```{r load_data}
 
@@ -37,11 +42,12 @@ df_knmi_station_coords <- read.csv( "Data/knmi_weather_stations.csv", sep=";")
 
 crs_source <- readRDS("Data/source_map_crs.rds") 
 sf_netherlands <- st_read("Data/netherlands_reference_map.gpkg")
+ls_best_rmse_weights <- readRDS("Data/weights_with_lowest_rmse_per_opt.rds")
 
 ```
 
-### 1.3 Clean windspeed data
-#### 1.3.1 Rename windspeed dataframe columns
+## 1.3 Clean windspeed data
+### 1.3.1 Rename windspeed dataframe columns
 
 ```{r rename_df_windspeed}
 
@@ -51,7 +57,7 @@ df_knmi_windspeed <- df_knmi_windspeed %>%
 
 ```
 
-#### 1.3.3 Find missing entries and na values
+### 1.3.3 Find missing entries and na values
 
 ```{r find_missing_stations}
 missing_rows_stations <- df_knmi_windspeed %>% 
@@ -69,7 +75,7 @@ missing_knmi_stations <- unique(rbind(missing_rows_stations, na_rows_stations))
 missing_knmi_stations
 ```
 
-#### 1.3.3 filter out rows with missing entries
+### 1.3.3 filter out rows with missing entries
 
 ```{r filter_df_windspeed}
 df_knmi_windspeed <- df_knmi_windspeed %>% 
@@ -79,7 +85,7 @@ df_knmi_windspeed
 
 ```
 
-### 1.4 Merge location data of `df_knmi_station_coords` with windspeed data of `df_knmi_windspeed` into new variable
+## 1.4 Merge location data of `df_knmi_station_coords` with windspeed data of `df_knmi_windspeed` into new variable
 
 ```{r merge_knmi_data}
 
@@ -93,7 +99,7 @@ df_knmi_stations
 
 ```
 
-### 1.5 Fix datetime and restructure order of dataframe
+## 1.5 Fix datetime and restructure order of dataframe
 
 ```{r clean_knmi_data}
 
@@ -105,7 +111,7 @@ df_knmi_stations <- df_knmi_stations %>%
 ```
 
 
-### 1.6 Aplly source CRS to reference map and create 5km2 grid
+## 1.6 Aplly source CRS to reference map and create 5km2 grid
 
 ```{r create_reference_grid}
 
@@ -128,7 +134,7 @@ sf_netherlands_grid
 
 ```
 
-### 1.7 Remove seatiles and other unneccesary tiles
+## 1.7 Remove seatiles and other unneccesary tiles
 
 ```{r reduce_reference_grid}
 
@@ -147,7 +153,7 @@ sf_netherlands_grid
 
 ```
 
-### 1.8 Show map of grids
+## 1.8 Show map of grids
 
 ```{r show_grid_map}
 
@@ -159,8 +165,11 @@ ggplot() +
 ```
 
 
-## 2. Observation and receptor preparation
-### 2.1 Take single sample of knmi windspeed timeseries as observations
+
+
+
+# 2. Observation and receptor preparation
+## 2.1 Take single sample of knmi windspeed timeseries as observations
 
 ```{r create_sf_observations}
 
@@ -178,7 +187,7 @@ df_observations
 
 ```
 
-### 2.2 Find grid which intersect with observations. 
+## 2.2 Find grid which intersect with observations. 
 ```{r observation_receptor_instersect}
 
 sf_receptors <- sf_netherlands_grid
@@ -198,7 +207,7 @@ sf_netherlands_receptor_grid
 
 ```
 
-### 2.3 Apply found indexes of intersects with windspeed values.
+## 2.3 Apply found indexes of intersects with windspeed values.
 
 ```{r apply_intersects}
 
@@ -231,7 +240,7 @@ sf_observations
 
 ```
 
-### 2.4 Calculate the centroids of the receptors are use that as the geometry instead of polygons. 
+## 2.4 Calculate the centroids of the receptors are use that as the geometry instead of polygons. 
 
 ```{r calc_receptor_centroids}
 
@@ -243,7 +252,7 @@ sf_observations <- sf_observations %>%
 
 ```
 
-### 2.5 Set default value of 0 for receptor variables
+## 2.5 Set default value of 0 for receptor variables
 
 ```{r set_receptor_variable_default}
 
@@ -251,7 +260,7 @@ sf_receptors <- sf_receptors %>% mutate(windspeed = 0)
 
 ```
 
-### 2.6 Remove observation cells from receptor grid
+## 2.6 Remove observation cells from receptor grid
 
 ```{r remove_obs_cells_from_receptor_grid}
 
@@ -261,46 +270,52 @@ sf_receptors <- sf_receptors %>%
 ```
 
 
-### 2.7 Prepare and save data for other R scripts like dynamic model traning routine
+## 2.7 Prepare and save data for other R scripts like dynamic model traning routine
 
 ```{r split_sf_coords_to_df}
 
-df_receptors <- sf_receptors %>%
+sf_receptors <- sf_receptors %>%
   mutate(
     x = st_coordinates(.)[,1],
     y = st_coordinates(.)[,2]
-  ) %>% 
-  as.data.frame() %>%
-  select(cell_id, x, y, !geometry)
+  ) 
 
-df_observations <- sf_observations %>%
+sf_observations <- sf_observations %>%
   mutate(
     x = st_coordinates(.)[,1],
     y = st_coordinates(.)[,2]
-  ) %>% 
-  as.data.frame() %>%
-  select(cell_id, x, y, !geometry)
+  )
 
 ```
 
 ```{r save_data_for_dynamic_training}
 
-saveRDS(sf_observations, "Data/knmi_windspeed_observations.rds")
+saveRDS(sf_observations, "Data/knmi_windspeed_observations_training_set")
 
 ```
 
 
-## 3 Perform interpolation
-### 3.0 Helper functions
+
+
+# 3. Prepare spatial interpolation
+
+## 3.1 Define helper functions
 
 ```{r plot_observations}
 
-show_prediction_map <- function(observation_variables){
+show_prediction_map <- function(observation_variables, title_text, caption_text){
+
   sf_netherlands_receptor_grid$windspeed <- 0
-  sf_netherlands_receptor_grid$windspeed <- observation_variables
+  sf_netherlands_receptor_grid$windspeed <- as.factor(ceiling(observation_variables / 10))
 
   map_plot <- ggplot() +
-    geom_sf(data = sf_netherlands_receptor_grid, aes(fill=windspeed))
+    geom_sf(
+      data = sf_netherlands_receptor_grid,
+      aes(fill = windspeed)
+    ) +
+    scale_fill_grey(start = 0.1, end = 0.9) +
+    labs(title = title_text, fill = "windspeed (m/s)", caption = caption_text) +
+    theme_bw()
   
   print(map_plot)
 }
@@ -323,57 +338,388 @@ calc_nrmse <- function(rmse, observations){
 ```
 
 
+## 3.2 Show best combination of weights and settings for spatial interpolation of training set
 
-### 3.1 Trend surface 
-#### 3.1.1 Train nth order trend models
+```{r show_best_weights_per_model_variation}
 
-```{r trend_models_train}
+ls_best_rmse_weights$trend_surface
+ls_best_rmse_weights$mqrbf
+ls_best_rmse_weights$idw
+ls_best_rmse_weights$od_kriging
+ls_best_rmse_weights$u_kriging
 
-trend_surface.first_order.model <- lm(
+```
+ 
+Based on these results surfaces will be generated using the following models:
+- Linear and hyperbolic trend surface using `weights = (1/windspeed) + case_weight`
+- MQ-RBF model with an `alpha_seed = 1.166434` and `smoothing_factor = 90.770461`
+- IDW model using `nmax=6` and `idp=1.028791`
+- Ordinary kriging using spherical variogram using `vgm(base_range + 36.41014, "Sph", base_psill + 0.3641014)` where `base_range` and `base_psill` where pre-calculated by fitting the variogram using `fit.variogram(...)` and `nmax=6`
+- Universal kriging with linear and hyperbolic regression model using `psill=0.4390736, range=43.90736, nmax=6` and `psill=0.5031153, range=50.31153, nmax=6`. 
+
+
+
+
+# 4. Perform spatial interpolation
+
+## 4.1 Train spatial interpolation models
+### 4.1.1 Trend surface 
+
+```{r trend_surface_train}
+
+model.trend_surface.linear <- lm(
   formula = windspeed ~ x + y,
-  data = df_observations
+  data = sf_observations,
+  weights = (1 / windspeed) + 1.151302
 )
 
-trend_surface.third_order.model <- lm(
+model.trend_surface.hyperbolic <- lm(
   formula = windspeed ~ x + y + I(x^2) + (x * y) + I(y^2) + I(x^3) + (I(x^2) * y) + (x * I(y^2)) + I(y^3),
-  data = df_observations
+  data = sf_observations,
+  weights = (1 / windspeed) + 1.000508
+)
+
+summary(model.trend_surface.linear)
+summary(model.trend_surface.hyperbolic)
+
+```
+
+### 4.1.2 MQ-RBF
+
+```{r mqrbf_model_train_define}
+
+mqrbf.calc_alpha_weights <- function(data, alpha_seed, smoothing_factor) {
+  n <- nrow(data)
+  K <- matrix(0, n, n)
+  for (i in 1:n) {
+    for (j in 1:n) {
+      K[i,j] <- sqrt(
+        1 + ( alpha_seed * 
+          ( (sqrt( 
+              ( ( data$x[i] - data$x[j] )^2 ) + 
+              ( ( data$y[i] - data$y[j] )^2 ) 
+            )^2) 
+          ) 
+        )
+      )
+      
+    }
+  }
+  
+  alpha_weights <- solve(K) %*% data$windspeed
+  alpha_weights <- as.vector(alpha_weights)
+  
+  return( list(data = data, alpha_weights = alpha_weights, smoothing_factor = smoothing_factor) )
+}
+
+```
+
+```{r mqrbf_train}
+
+model.mqrbf <- mqrbf.calc_alpha_weights(
+    data = sf_observations, 
+    alpha_seed = 1.166434,
+    smoothing_factor = 90.770461
+)
+
+summary(model.mqrbf$alpha_weights)
+
+```
+
+### 4.1.3 IDW
+
+```{r idw_train}
+
+model.idw <- gstat(
+  formula = windspeed ~ 1,
+  data = sf_observations,
+  nmax = 6,
+  set = list(idp = 1.028791)
+)
+
+
+```
+
+
+### 4.1.4 Ordinary kriging
+
+```{r od_kriging_vgm_train}
+
+vgm.od_kriging <- variogram(windspeed ~ 1, data = sf_observations)
+model.od_kriging.vgm <- suppressWarnings(fit.variogram(vgm.od_kriging, vgm("Sph")))
+
+base_psill <- model.od_kriging.vgm$psill[1]
+base_range <- model.od_kriging.vgm$range[2]
+
+model.od_kriging.vgm.linear <- suppressWarnings(
+  fit.variogram(vgm.od_kriging, vgm(
+    psill = base_psill + 0.3641014, 
+    model = "Sph", 
+    range = base_range + 36.41014
+    )
+  )
+)
+
+model.od_kriging.vgm
+
+```
+
+```{r od_kriging_train}
+
+model.od_kriging <- gstat(
+  formula = windspeed ~ 1,
+  data = sf_observations,
+  nmax = 6,
+  model = model.od_kriging.vgm
 )
 
 ```
 
-#### 3.1.2 Predict surface with models
 
-```{r trend_models_predict}
+### 4.1.5 Universal kriging
 
-trend_surface.first_order.preds <- as.data.frame(predict(trend_surface.first_order.model, df_receptors))
-trend_surface.third_order.preds <- as.data.frame(predict(trend_surface.third_order.model, df_receptors))
+```{r u_kriging_vgm_train}
 
+vgm.u_kriging <- variogram(windspeed ~ x + y, data = sf_observations)
+model.u_kriging.vgm <- suppressWarnings(fit.variogram(vgm.u_kriging, vgm("Sph")))
+
+base_psill <- model.u_kriging.vgm$psill[1]
+base_range <- model.u_kriging.vgm$range[2]
+
+model.u_kriging.vgm.linear <- suppressWarnings(
+  fit.variogram(vgm.u_kriging, vgm(
+    psill = base_psill + 0.4390736, 
+    model = "Sph", 
+    range = base_range + 43.90736
+    )
+  )
+)
+
+model.u_kriging.vgm.hyperbolic <- suppressWarnings(
+  fit.variogram(vgm.u_kriging, vgm(
+    psill = base_psill + 0.5031153, 
+    model = "Sph", 
+    range = base_range + 50.31153
+    )
+  )
+)
+
+model.u_kriging.vgm.linear
+model.u_kriging.vgm.hyperbolic
+
+```
+- The syntax for a `formula` in the `variogram()` function is unconventional. Here `windspeed ~ x+y` simply indicates "variogram optimized for universal kriging" and `windspeed ~ 1` indicates simple or ordinary kriging.  
+
+
+```{r u_kriging_train}
+
+model.u_kriging.linear <- gstat(
+  formula = windspeed ~ x + y,
+  data = sf_observations,
+  nmax = 6,
+  model = model.u_kriging.vgm.linear
+)
+
+model.u_kriging.hyperbolic <- gstat(
+  formula = windspeed ~ abs(x + y + (x^2) + (x * y) + (y^2) + (x^3) + ((x^2) * y) + (x * (y^2)) + (y^3)),
+  data = sf_observations,
+  nmax = 6,
+  model = model.u_kriging.vgm.hyperbolic
+)
+
+```
+- The syntax for the `formula` parameter is unconventional in the `gstat()` function. Exponents do not need a `I(x^n)` clause and `abs()` is used to indicate that a higher order polynomial regression model is used without auxiliary variables. To use auxiliary variables for something like co-kriging you need to remove the `abs(....)` and use `log(windspeed)`.    
+
+
+
+
+
+
+
+
+
+
+
+## 4.2 Predict receptor points to create surface
+### 4.2.1 Trend surface
+```{r trend_surface_predict}
+
+preds.trend_surface.linear <- predict(model.trend_surface.linear, sf_receptors)
+preds.trend_surface.hyperbolic <- predict(model.trend_surface.hyperbolic, sf_receptors)
+
+summary(preds.trend_surface.linear)
+summary(preds.trend_surface.hyperbolic)
+
+```
+
+### 4.2.2 MQ-RBF
+
+```{r mqrbf_predict_model_define}
+
+mqrbf.calc_distance <- function(r, c){
+  return ( sqrt( (r^2) + (c^2) ) )
+}
+
+predict.mqrbf <- function(object, newdata){
+  
+  x_receptors <- newdata$x
+  y_receptors <- newdata$y
+  x_observations <- object$data$x
+  y_observations <- object$data$y
+  alpha_weights <- object$alpha_weights
+  smoothing_factor <- object$smoothing_factor
+  
+  n_i <- length(x_receptors)
+  n_j <- length(x_observations)
+  
+  # value of 0.05 is to ensure that a float is used and not int. 
+  # Values ({0.0 ... 0.009} == 0) in rep() function of R.
+  z <- rep(0.01, n_i)  
+  
+  for(i in 1:n_i) {
+    x_new <- x_receptors[i]
+    y_new <- y_receptors[i]
+    z_new <- 0
+    for(j in 1:n_j) {
+      weight_j <- alpha_weights[j]
+  
+      x_j <- x_observations[j]
+      y_j <- y_observations[j]
+  
+      r <- sqrt( ((x_j-x_new)^2) + ((y_j-y_new)^2) )
+      m_distance <- mqrbf.calc_distance(r, smoothing_factor)
+  
+      z_new <- z_new + (weight_j * m_distance)
+    }
+    z[i] <- z_new
+  }
+  
+  return(z)
+  
+}
 
 
 ```
 
-```{r trend_models_rename_predict}
+```{r mqrbf_predict}
 
-colnames(trend_surface.first_order.preds) <- c("windspeed")
-colnames(trend_surface.third_order.preds) <- c("windspeed")
+preds.mqrbf <- predict.mqrbf(model.mqrbf, sf_receptors)
 
-```
-
-#### 3.1.3 Show results in map
-
-```{r show_first_order_trend_map_results}
-
-show_prediction_map(trend_surface.first_order.preds$windspeed)
-
-```
-```{r show_third_order_trend_map_results}
-
-show_prediction_map(trend_surface.third_order.preds$windspeed)
+summary(preds.mqrbf)
 
 ```
 
+### 4.2.3 IDW
 
-#### 3.1.4 Validate results
+```{r idw_predict}
+
+preds.idw <- predict(model.idw, sf_receptors)$var1.pred
+summary(preds.idw)
+
+```
+
+### 4.2.4 Ordinary kriging
+
+```{r od_kriging_predict}
+
+preds.od_kriging <- predict(model.od_kriging, sf_receptors)$var1.pred
+summary(preds.od_kriging)
+
+```
+
+### 4.2.5 Universal kriging
+
+```{r od_kriging_predict}
+
+preds.u_kriging.linear <- predict(model.u_kriging.linear, sf_receptors)$var1.pred
+preds.u_kriging.hyperbolic <- predict(model.u_kriging.hyperbolic, sf_receptors)$var1.pred
+
+summary(preds.u_kriging.linear)
+summary(preds.u_kriging.hyperbolic)
+
+```
+
+
+
+
+## 4.3 Show generated surfaces
+
+### 4.3.1 Trend surface
+
+```{r show_preds_trend_surface}
+
+show_prediction_map(
+  preds.trend_surface.linear,
+  title_text = "Trend surface (1st order)",
+  caption_text = "case_weight = 1.151302"
+)
+
+show_prediction_map(
+  preds.trend_surface.hyperbolic,
+  title_text = "Trend surface (3rd order)",
+  caption_text = "case_weight = 1.000508"
+)
+
+```
+
+
+### 4.3.2 MQ-RBF
+
+```{r show_preds_mqrbf}
+
+show_prediction_map(
+  preds.mqrbf,
+  title_text = "MQ-RBF",
+  caption_text = "alpha_seed = 1.166434; smoothing_factor = 90.770461"
+)
+
+```
+
+### 4.3.3 IDW
+
+```{r show_preds_idw}
+
+show_prediction_map(
+  preds.idw,
+  title_text = "IDW",
+  caption_text = "nmax=6; idp=1.028791"
+)
+
+```
+
+### 4.3.4 Ordinary kriging
+
+```{r show_preds_od_kriging}
+
+show_prediction_map(
+  preds.od_kriging,
+  title_text = "Ordinary Kriging",
+  caption_text = "vgm=\"Sph\"; psill=348.3421; range=40943.12; nmax=6"
+)
+
+```
+
+### 4.3.4 Universal kriging
+
+```{r show_preds_u_kriging}
+
+show_prediction_map(
+  preds.u_kriging.linear,
+  title_text = "Universal Kriging (1st order)",
+  caption_text = "vgm=\"Sph\"; psill=188.709; range=13714.15; nmax=6"
+)
+
+show_prediction_map(
+  preds.u_kriging.hyperbolic,
+  title_text = "Universal Kriging (3rd order)",
+  caption_text = "vgm=\"Sph\"; psill=188.7081; range=13714.12; nmax=6"
+)
+
+```
+
+
+
+### 3.1.4 Validate results
 
 ```{r perform_cv_on_trend_surface_models}
 
@@ -423,102 +769,12 @@ print(sprintf(
 ```
 
 
+
+
+
 ### 3.2 Radial Basis function
-#### 3.2.1 Train MQ-RBF weights based on observations
-```{r define_mqrbf_weight_function}
 
-# Calculate RBF weights
-calc_mqrbf_alpha_weights <- function(x, y, z, eps) {
-  n <- length(x)
-  K <- matrix(0, n, n)
-  for (i in 1:n) {
-    for (j in 1:n) {
-      K[i,j] <- sqrt(1 + eps * ((sqrt((x[i]-x[j])^2 + (y[i]-y[j])^2))^2) ) 
-    }
-  }
-  alpha <- solve(K) %*% z
-  return(as.vector(alpha))
-}
-
-```
-
-```{r calc_mqrbf_weights}
-
-mqrbf.weights <- calc_mqrbf_alpha_weights(
-    df_observations$x, df_observations$y, 
-    df_observations$windspeed, 1.543523
-)
-
-head(mqrbf.weights)
-```
-
-
-#### 3.2.2 Predict surface with MQ-RBF model 
-
-```{r define_mqrbf_model}
-
-calc_mqrbf_distance <- function(r, c){
-  return ( sqrt( (r^2) + (c^2) ) )
-}
-
-calc_mqrbf_surface <- function(
-  x_receptors, y_receptors, 
-  x_observations, y_observations,
-  alpha_weights, smoothing_factor
-){
-  
-  n_i <- length(x_receptors)
-  n_j <- length(x_observations)
-  
-  # value of 0.05 is to ensure that a float is used and not int. 
-  # Values ({0.0 ... 0.009} == 0) in rep() function of R.
-  z <- rep(0.01, n_i)  
-  
-  for(i in 1:n_i) {
-    x_new <- x_receptors[i]
-    y_new <- y_receptors[i]
-    z_new <- 0
-    for(j in 1:n_j) {
-      weight_j <- alpha_weights[j]
-  
-      x_j <- x_observations[j]
-      y_j <- y_observations[j]
-  
-      r <- sqrt( ((x_j-x_new)^2) + ((y_j-y_new)^2) )
-      m_distance <- calc_mqrbf_distance(r, smoothing_factor)
-  
-      z_new <- z_new + (weight_j * m_distance)
-    }
-    z[i] <- z_new
-  }
-  
-  return(z)
-  
-}
-
-```
-
-```{r predict_mqrbf_surface}
-
-mqrbf.preds <- calc_mqrbf_surface(
-  df_receptors$x, df_receptors$y,
-  df_observations$x, df_observations$y,
-  mqrbf.weights, 0.234334
-)
-
-```
-
-#### 3.2.3 Show results in map
-
-```{r show_mqrbf_surface}
-
-show_prediction_map(mqrbf.preds)
-
-```
-
-
-
-#### 3.2.4 Validate results
+### 3.2.4 Validate results
 
 ```{r define_mqrbf_cross_validation_method}
 
@@ -575,8 +831,10 @@ print(sprintf(
 
 ```
 
-### 3.3 Inverse Distance weighted
-#### 3.3.1 Train idw model with `n_neighbors=5` and `idp=1.5`.
+
+
+## 3.3 Inverse Distance weighted
+### 3.3.1 Train idw model with `n_neighbors=5` and `idp=1.5`.
 
 ```{r train_idw_model}
 
@@ -589,7 +847,7 @@ idw_model.model <- gstat(
 
 ```
 
-#### 3.3.2 Predict surface with idw model
+### 3.3.2 Predict surface with idw model
 
 ```{r pred_idw_model}
 
@@ -597,7 +855,7 @@ idw_model.preds <- as.data.frame(predict(idw_model.model, sf_receptors))
 
 ```
 
-#### 3.3.3 Show results in map
+### 3.3.3 Show results in map
 
 ```{r results_idw_model}
 
@@ -605,7 +863,7 @@ show_prediction_map(idw_model.preds$var1.pred)
 
 ```
 
-#### 3.3.4 Validate results
+### 3.3.4 Validate results
 
 ```{r validate_idw_model, echo=FALSE, results='hide', message=FALSE, warning=FALSE}
 
@@ -628,8 +886,10 @@ print(sprintf(
 ```
 
 
-### 3.4 Ordinary Kriging
-#### 3.4.1 Fit variogram model 
+
+
+## 3.4 Ordinary Kriging
+### 3.4.1 Fit variogram model 
 ```{r fit_ordinary_kriging_variogram, warning=FALSE}
 
 # Create variogram
@@ -641,7 +901,7 @@ od_kriging.vgm.fit <- fit.variogram(od_kriging.vgm, vgm(348.342080, "Sph", 40943
 
 ```
 
-#### 3.4.2 Train ordinary kriging model
+### 3.4.2 Train ordinary kriging model
 
 ```{r train_ordinary_kriging_models}
 
@@ -655,7 +915,7 @@ od_kriging.model <- gstat(
 ```
 
 
-#### 3.4.3 Predict surfaces with ordinary kriging models
+### 3.4.3 Predict surfaces with ordinary kriging models
 
 ```{r pred_universal_kriging_surfaces}
 
@@ -664,7 +924,7 @@ od_kriging.model.preds <- as.data.frame(predict(od_kriging.model, sf_receptors))
 ```
 
 
-#### 3.4.4 Show predictions in map
+### 3.4.4 Show predictions in map
 
 ```{r show_ordinry_kriging_surfaces}
 
@@ -674,7 +934,7 @@ show_prediction_map(od_kriging.model.preds$var1.pred)
 
 - Results show little to no difference in range of values, therefor it can be assumed that impact of seasonal or anual mean on ordinary kriging is minimal. 
 
-#### 3.4.5 Validate results
+### 3.4.5 Validate results
 
 ```{r validate_simple_kriging_model, echo=FALSE}
 
@@ -694,6 +954,8 @@ print(sprintf(
 ))
 
 ```
+
+
 
 
 ### 3.5 Universal kriging

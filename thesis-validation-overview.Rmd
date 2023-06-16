@@ -1,0 +1,254 @@
+---
+title: "Thesis Validation Overview"
+author: "Arsalan Anwari"
+date: "2023-06-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1. Data preparation
+
+## 1.1 Load libraries
+```{r load_libs, warning=FALSE, include=FALSE}
+
+library(tidyverse)
+library(sf)
+
+library(conflicted)
+conflict_prefer("filter", "dplyr")
+conflict_prefer("lag", "dplyr")
+
+
+```
+
+## 1.2 Load data
+```{r load_data}
+
+sf_oberservations_train <- readRDS("Data/knmi_windspeed_observations_training_set.rds")
+ls_training_results <- readRDS("Data/dynamic_training_routine_training_results.rds")
+ls_training_settings <- readRDS("Data/dynamic_training_routine_training_settings.rds")
+
+```
+
+## 1.3 Prepare data of training set
+
+```{r prepare_data}
+
+sf_oberservations_train <- sf_oberservations_train %>%
+    mutate(
+      x = st_coordinates(.)[,1],
+      y = st_coordinates(.)[,2]
+    )
+
+df_training_results.trend_surface <- ls_training_results$trend_surface
+df_training_results.mqrbf <- ls_training_results$mqrbf
+df_training_results.idw <- ls_training_results$idw
+df_training_results.od_kriging <- ls_training_results$od_kriging
+df_training_results.u_kriging <- ls_training_results$u_kriging
+
+```
+
+```{r show_data}
+
+head(df_training_results.trend_surface)
+head(df_training_results.mqrbf)
+head(df_training_results.idw)
+head(df_training_results.od_kriging)
+head(df_training_results.u_kriging)
+
+```
+
+```{r prepare_model_opts}
+
+model_opt.trend_surface <- c("model = linear", "model = hyperbolic")
+model_opt.mqrbf <- sprintf("smoothing factor = %f", ls_training_settings$mqrbf_smoothing_factor)
+model_opt.idw <- sprintf("neighbors = %d", ls_training_settings$neighbor_range)
+model_opt.od_kriging <- sprintf("neighbors = %d", ls_training_settings$neighbor_range)
+model_opt.u_kriging <- c(
+  sprintf("neighbors = %d, model = %s", 5, "linear"),
+  sprintf("neighbors = %d, model = %s", 5, "hyperbolic"),
+  sprintf("neighbors = %d, model = %s", 6, "linear"),
+  sprintf("neighbors = %d, model = %s", 6, "hyperbolic"),
+  sprintf("neighbors = %d, model = %s", 7, "linear"),
+  sprintf("neighbors = %d, model = %s", 7, "hyperbolic")
+)
+
+```
+
+```{r modify_training_results}
+
+df_training_results.trend_surface <- df_training_results.trend_surface %>%
+  rename(model_opt_id = model_opt, old_rmse = old_rsme, new_rmse = new_rsme) %>%
+  mutate(
+    model_opt_id = as.integer(model_opt_id),
+    model_opt_name = model_opt.trend_surface[model_opt_id],
+    train_iteration = as.integer(train_iteration),
+    old_rmse = as.double(old_rmse),
+    new_rmse = as.double(new_rmse),
+    loss_value = as.double(loss_value),
+    case_weight = as.double(weights)
+  ) %>%
+  select( model_opt_id, model_opt_name, train_iteration, case_weight, old_rmse, new_rmse, loss_value )
+
+df_training_results.mqrbf <- df_training_results.mqrbf %>%
+  rename(model_opt_id = model_opt, old_rmse = old_rsme, new_rmse = new_rsme) %>%
+  mutate(
+    model_opt_id = as.integer(model_opt_id),
+    model_opt_name = model_opt.mqrbf[model_opt_id],
+    train_iteration = as.integer(train_iteration),
+    old_rmse = as.double(old_rmse),
+    new_rmse = as.double(new_rmse),
+    loss_value = as.double(loss_value),
+    alpha_weight = as.double(weights)
+  ) %>%
+  select( model_opt_id, model_opt_name, train_iteration, alpha_weight, old_rmse, new_rmse, loss_value )
+
+df_training_results.idw <- df_training_results.idw %>%
+  rename(model_opt_id = model_opt, old_rmse = old_rsme, new_rmse = new_rsme) %>%
+  mutate(
+    model_opt_id = as.integer(model_opt_id),
+    model_opt_name = model_opt.idw[model_opt_id],
+    train_iteration = as.integer(train_iteration),
+    old_rmse = as.double(old_rmse),
+    new_rmse = as.double(new_rmse),
+    loss_value = as.double(loss_value),
+    idp = as.double(weights)
+  ) %>%
+  select( model_opt_id, model_opt_name, train_iteration, idp, old_rmse, new_rmse, loss_value )
+
+df_training_results.od_kriging <- df_training_results.od_kriging %>%
+  rename(model_opt_id = model_opt, old_rmse = old_rsme, new_rmse = new_rsme) %>%
+  mutate(
+    model_opt_id = as.integer(model_opt_id),
+    model_opt_name = model_opt.od_kriging[model_opt_id],
+    train_iteration = as.integer(train_iteration),
+    old_rmse = as.double(old_rmse),
+    new_rmse = as.double(new_rmse),
+    loss_value = as.double(loss_value),
+    weights = strsplit(weights, ",")
+  ) %>%
+  unnest_wider(weights, names_sep = "_") %>%
+  mutate( 
+    psill = as.double(weights_2), 
+    range = as.double(weights_3) 
+  ) %>%
+  select( model_opt_id, model_opt_name, train_iteration, psill, range, old_rmse, new_rmse, loss_value )
+
+df_training_results.u_kriging <- df_training_results.u_kriging %>%
+  rename(model_opt_id = model_opt, old_rmse = old_rsme, new_rmse = new_rsme) %>%
+  mutate(
+    model_opt_id = as.integer(model_opt_id),
+    model_opt_name = model_opt.u_kriging[model_opt_id],
+    train_iteration = as.integer(train_iteration),
+    old_rmse = as.double(old_rmse),
+    new_rmse = as.double(new_rmse),
+    loss_value = as.double(loss_value),
+    weights = strsplit(weights, ",")
+  ) %>%
+  unnest_wider(weights, names_sep = "_") %>%
+  mutate( 
+    psill = as.double(weights_2), 
+    range = as.double(weights_3) 
+  ) %>%
+  select( model_opt_id, model_opt_name, train_iteration, psill, range, old_rmse, new_rmse, loss_value )
+
+```
+
+
+```{r show_modify_training_results}
+
+head(df_training_results.trend_surface)
+head(df_training_results.mqrbf)
+head(df_training_results.idw)
+head(df_training_results.od_kriging)
+head(df_training_results.u_kriging)
+
+```
+
+```{r andskjasndk}
+
+df_training_results.u_kriging
+
+```
+
+
+# 2. Data Analysis
+
+
+## 2.1 Find weights with lowest RMSE per model variation for training set 
+
+```{r find_lowest_rmse_per_variation}
+
+find_lowest_rmse_per_model_opt <- function(df){
+  df_grouped_rmse <- df %>%
+    group_by(model_opt_id) %>%
+    summarise(old_rmse = min(old_rmse))
+
+  df_found <- df %>%
+    filter(new_rmse %in% df_grouped_rmse$old_rmse) %>%
+    rename(rmse = new_rmse) %>%
+    select(!c(model_opt_id, train_iteration, loss_value, old_rmse))
+  
+  if (nrow(df_found) == 0){
+    df_found <- df %>%
+      filter(old_rmse %in% df_grouped_rmse$old_rmse) %>%
+      rename(rmse = old_rmse) %>%
+      select(!c(model_opt_id, train_iteration, loss_value, new_rmse))
+  }
+  
+  return(df_found)
+}
+
+```
+
+
+```{r get_lowest_rmse_per_variation}
+
+df_lowest_rmse_per_opt.trend_surface <- find_lowest_rmse_per_model_opt(df_training_results.trend_surface)
+df_lowest_rmse_per_opt.mqrbf <- find_lowest_rmse_per_model_opt(df_training_results.mqrbf)
+df_lowest_rmse_per_opt.idw <- find_lowest_rmse_per_model_opt(df_training_results.idw)
+df_lowest_rmse_per_opt.od_kriging <- find_lowest_rmse_per_model_opt(df_training_results.od_kriging)
+df_lowest_rmse_per_opt.u_kriging <- find_lowest_rmse_per_model_opt(df_training_results.u_kriging)
+
+```
+
+```{r show_lowest_rmse_per_variation}
+
+df_lowest_rmse_per_opt.trend_surface
+df_lowest_rmse_per_opt.mqrbf
+df_lowest_rmse_per_opt.idw
+df_lowest_rmse_per_opt.od_kriging
+df_lowest_rmse_per_opt.u_kriging
+
+```
+
+## 2.1 Save results of combination of weight and variation with lowest RMSE per model
+
+```{r find_lowest_rmse_combo}
+
+save.weights_with_lowest_rmse_per_opt <- list(
+  trend_surface = df_lowest_rmse_per_opt.trend_surface,
+  mqrbf = df_lowest_rmse_per_opt.mqrbf,
+  idw = df_lowest_rmse_per_opt.idw,
+  od_kriging = df_lowest_rmse_per_opt.od_kriging,
+  u_kriging = df_lowest_rmse_per_opt.u_kriging
+)
+
+saveRDS(save.weights_with_lowest_rmse_per_opt, "Data/weights_with_lowest_rmse_per_opt.rds")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+

@@ -14,7 +14,7 @@
   set.seed(73829)
   
   # Load data
-  sf_observations <- readRDS("Data/knmi_windspeed_observations.rds")
+  sf_observations <- readRDS("Data/knmi_windspeed_observations_january_01.rds")
   
   # Split x and y coordinate from observations and receptors as separate columns
   sf_observations <- sf_observations %>%
