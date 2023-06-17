@@ -10,7 +10,6 @@ knitr::opts_chunk$set(echo = TRUE)
 ```
 
 
-
 # 1. Data preparation
 ## 1.1 Load libraries 
 
@@ -165,9 +164,6 @@ ggplot() +
 ```
 
 
-
-
-
 # 2. Observation and receptor preparation
 ## 2.1 Take single sample of knmi windspeed timeseries as observations
 
@@ -269,7 +265,6 @@ sf_receptors <- sf_receptors %>%
 
 ```
 
-
 ## 2.7 Prepare and save data for other R scripts like dynamic model traning routine
 
 ```{r split_sf_coords_to_df}
@@ -295,10 +290,7 @@ saveRDS(sf_observations, "Data/knmi_windspeed_observations_training_set")
 ```
 
 
-
-
 # 3. Prepare spatial interpolation
-
 ## 3.1 Define helper functions
 
 ```{r plot_observations}
@@ -330,9 +322,16 @@ calc_rmse <- function(residuals) {
 }
 
 calc_nrmse <- function(rmse, observations){
-  max <- max(observations)
-  min <- min(observations)
-  return (1.0 - ( rmse / (max - min) ))
+  return( rmse / sd(observations$windspeed) )
+}
+
+```
+
+```{r train_gstat_cv}
+
+train.gstat <- function(model){
+  { sink(nullfile()); cv <- gstat.cv(model, nfold = nrow(sf_observations), verbose=FALSE); sink(); }  
+  return( list(residuals = cv$residual) )
 }
 
 ```
@@ -358,10 +357,7 @@ Based on these results surfaces will be generated using the following models:
 - Universal kriging with linear and hyperbolic regression model using `psill=0.4390736, range=43.90736, nmax=6` and `psill=0.5031153, range=50.31153, nmax=6`. 
 
 
-
-
 # 4. Perform spatial interpolation
-
 ## 4.1 Train spatial interpolation models
 ### 4.1.1 Trend surface 
 
@@ -409,7 +405,12 @@ mqrbf.calc_alpha_weights <- function(data, alpha_seed, smoothing_factor) {
   alpha_weights <- solve(K) %*% data$windspeed
   alpha_weights <- as.vector(alpha_weights)
   
-  return( list(data = data, alpha_weights = alpha_weights, smoothing_factor = smoothing_factor) )
+  return(list(
+    data = data, 
+    alpha_weights = alpha_weights, 
+    alpha_seed = alpha_seed, 
+    smoothing_factor = smoothing_factor
+  ))
 }
 
 ```
@@ -531,16 +532,8 @@ model.u_kriging.hyperbolic <- gstat(
 - The syntax for the `formula` parameter is unconventional in the `gstat()` function. Exponents do not need a `I(x^n)` clause and `abs()` is used to indicate that a higher order polynomial regression model is used without auxiliary variables. To use auxiliary variables for something like co-kriging you need to remove the `abs(....)` and use `log(windspeed)`.    
 
 
-
-
-
-
-
-
-
-
-
 ## 4.2 Predict receptor points to create surface
+
 ### 4.2.1 Trend surface
 ```{r trend_surface_predict}
 
@@ -719,69 +712,47 @@ show_prediction_map(
 
 
 
-### 3.1.4 Validate results
+## 4.4 Calculate RMSE and Normalized RMSE (NRMSE)
+### 4.4.1 Trend surface
 
-```{r perform_cv_on_trend_surface_models}
+```{r calc_rmse_trend_surface}
 
-trend_surface.first_order.model_cv <- train(
+results.trend_surface.linear <- train(
   windspeed ~ x + y,
   method = "lm",
-  data = df_observations,
-  trControl = trainControl(method = "LOOCV")
+  data = sf_observations,
+  trControl = trainControl(method = "LOOCV"),
+  weights = (1 / windspeed) + 1.151302
 )
 
-trend_surface.third_order.model_cv <- train(
+results.trend_surface.hyperbolic <- train(
   windspeed ~ x + y + I(x^2) + (x * y) + I(y^2) + I(x^3) + (I(x^2) * y) + (x * I(y^2)) + I(y^3),
   method = "lm",
-  data = df_observations,
-  trControl = trainControl(method = "LOOCV")
+  data = sf_observations,
+  trControl = trainControl(method = "LOOCV"),
+  weights = (1 / windspeed) + 1.000508
 )
+
+results.trend_surface.linear.rmse <- calc_rmse(resid(results.trend_surface.linear))
+results.trend_surface.hyperbolic.rmse <- calc_rmse(resid(results.trend_surface.hyperbolic))
+
+results.trend_surface.linear.nrmse <- calc_nrmse(results.trend_surface.linear.rmse, sf_observations)
+results.trend_surface.hyperbolic.nrmse <- calc_nrmse(results.trend_surface.hyperbolic.rmse, sf_observations)
 
 ```
 
-```{r calc_rsme_trend_surface}
+### 4.4.2 MQ-RBF
 
-trend_surface.first_order.results.rmse <- (trend_surface.first_order.model_cv$results$RMSE)
+```{r define_cv_model_mqrbf}
 
-trend_surface.first_order.results.nrmse <- calc_nrmse(
-  trend_surface.first_order.results.rmse, 
-  df_observations$windspeed
-)
-
-trend_surface.third_order.results.rmse <- (trend_surface.third_order.model_cv$results$RMSE)
-trend_surface.third_order.results.nrmse <- calc_nrmse(
-  trend_surface.third_order.results.rmse, 
-  df_observations$windspeed
-)
-
-print(sprintf(
-  "First order trend: rmse=%f nrmse=%f", 
-  trend_surface.first_order.results.rmse, 
-  trend_surface.first_order.results.nrmse
-))
-
-print(sprintf(
-  "Third order trend: rmse=%f nrmse=%f", 
-  trend_surface.third_order.results.rmse, 
-  trend_surface.third_order.results.nrmse
-))
-
-```
-
-
-
-
-
-### 3.2 Radial Basis function
-
-### 3.2.4 Validate results
-
-```{r define_mqrbf_cross_validation_method}
-
-calc_mqrbf_loocv_residuals <- function(
-    x_observations, y_observations, z_observations,
-    training_weight, smoothing_factor
-){
+train.mqrbf <- function(model){
+    
+  x_observations <- model$data$x
+  y_observations <- model$data$y
+  z_observations <- model$data$windspeed
+  alpha_seed <- model$alpha_seed
+  smoothing_factor <- model$smoothing_factor
+  
   n <- length(x_observations)
   residuals <- rep(0.01, n)
   
@@ -789,276 +760,124 @@ calc_mqrbf_loocv_residuals <- function(
     x_train <- x_observations[-i]
     y_train <- y_observations[-i]
     z_train <- z_observations[-i]
+    data_train <- data.frame(x = x_train, y = y_train, windspeed = z_train)
     
     x_new <- as.vector(x_observations[i])
     y_new <- as.vector(y_observations[i])
+    newdata <- list(x = x_new, y = y_new)
     
-    alpha_weights <- calc_mqrbf_alpha_weights(x_train, y_train, z_train, training_weight)
+    model <- mqrbf.calc_alpha_weights(data_train, alpha_seed, smoothing_factor)
     
-    z_new <- calc_mqrbf_surface(
-      x_new, y_new,
-      x_train, y_train,
-      alpha_weights, smoothing_factor
-    )
+    z_new <- predict.mqrbf(model, newdata)
     
     residuals[i] <- (z_observations[i] - z_new)
   }
   
-  return(residuals)
+  return(list(residuals=residuals))
 }
 
 ```
 
-```{r calc_mqrbf_nrmse}
+```{r calc_rmse_mqrbf}
 
-mqrbf.cv.residuals <- calc_mqrbf_loocv_residuals(
-  df_observations$x, df_observations$y, df_observations$windspeed,
-  1.543523, 100.4248998
+results.mqrbf <- train.mqrbf(model.mqrbf)
+results.mqrbf.rmse <- calc_rmse(results.mqrbf$residuals)
+results.mqrbf.nrmse <- calc_nrmse(results.mqrbf.rmse, sf_observations)
+
+```
+
+### 4.4.3 IDW
+
+```{r calc_rmse_idw}
+
+results.idw <- train.gstat(model.idw)
+results.idw.rmse <- calc_rmse(results.idw$residuals)
+results.idw.nrmse <- calc_nrmse(results.idw.rmse, sf_observations)
+  
+```
+
+### 4.4.4 Ordinary kriging
+
+```{r calc_rmse_od_kriging}
+
+results.od_kriging <- train.gstat(model.od_kriging)
+results.od_kriging.rmse <- calc_rmse(results.od_kriging$residuals)
+results.od_kriging.nrmse <- calc_nrmse(results.od_kriging.rmse, sf_observations)
+  
+```
+
+### 4.4.4 Universal kriging
+
+```{r calc_rmse_od_kriging}
+
+results.u_kriging.linear <- train.gstat(model.u_kriging.linear)
+results.u_kriging.hyperbolic <- train.gstat(model.u_kriging.hyperbolic)
+
+results.u_kriging.linear.rmse <- calc_rmse(results.u_kriging.linear$residuals)
+results.u_kriging.hyperbolic.rmse <- calc_rmse(results.u_kriging.hyperbolic$residuals)
+
+results.u_kriging.linear.nrmse <- calc_nrmse(results.u_kriging.linear.rmse, sf_observations)
+results.u_kriging.hyperbolic.nrmse <- calc_nrmse(results.u_kriging.hyperbolic.rmse, sf_observations)
+  
+```
+
+
+# 5. Conclusion
+
+```{r compare_rmse_nrmse_per_model}
+
+model_names <- c(
+  "Trend surface (1st order)",
+  "Trend surface (3rd order)",
+  "MQ-RBF",
+  "IDW",
+  "Ordinary kriging",
+  "Universal kriging (1st order)",
+  "Universal kriging (3rd order)"
 )
 
-mqrbf.cv.rsme <- calc_rmse(mqrbf.cv.residuals)
-mqrbf.cv.nrsme <- calc_nrmse(mqrbf.cv.rsme, df_observations$windspeed)
-
-```
-
-```{r show_mqrbf_nrmse}
-
-print(sprintf(
-  "MQ-RBF [eps=1.543523, c=0.234334]: rmse=%f nrmse=%f", 
-  mqrbf.cv.rsme, 
-  mqrbf.cv.nrsme
-))
-
-```
-
-
-
-## 3.3 Inverse Distance weighted
-### 3.3.1 Train idw model with `n_neighbors=5` and `idp=1.5`.
-
-```{r train_idw_model}
-
-idw_model.model <- gstat(
-  formula = windspeed ~ 1,
-  data = sf_observations,
-  nmax = 5,
-  set = list(idp = 1.5)
+model_weights <- c(
+  "case_weight = 1.151302",
+  "case_weight = 1.000508",
+  "alpha_seed = 1.166434; smoothing_factor = 90.770461",
+  "nmax=6; idp=1.028791",
+  "vgm=\"Sph\"; psill=348.3421; range=40943.12; nmax=6",
+  "vgm=\"Sph\"; psill=188.709; range=13714.15; nmax=6",
+  "vgm=\"Sph\"; psill=188.7081; range=13714.12; nmax=6"
 )
 
-```
-
-### 3.3.2 Predict surface with idw model
-
-```{r pred_idw_model}
-
-idw_model.preds <- as.data.frame(predict(idw_model.model, sf_receptors))
-
-```
-
-### 3.3.3 Show results in map
-
-```{r results_idw_model}
-
-show_prediction_map(idw_model.preds$var1.pred)
-
-```
-
-### 3.3.4 Validate results
-
-```{r validate_idw_model, echo=FALSE, results='hide', message=FALSE, warning=FALSE}
-
-# if nfolds = nrow(observations) than gstat.cv uses LOOCV by default
-idw_model.cv <- gstat.cv(idw_model.model, nfold = nrow(sf_observations)) 
-
-```
-
-```{r calc_nrmse_idw_model}
-
-idw_model.rsme <- calc_rmse(idw_model.cv$residual)
-idw_model.nrsme <- calc_nrmse(idw_model.rsme, sf_observations$windspeed)
-
-print(sprintf(
-  "IDW [n=5, idp=1.5]: rmse=%f nrmse=%f", 
-  idw_model.rsme, 
-  idw_model.nrsme
-))
-
-```
-
-
-
-
-## 3.4 Ordinary Kriging
-### 3.4.1 Fit variogram model 
-```{r fit_ordinary_kriging_variogram, warning=FALSE}
-
-# Create variogram
-od_kriging.vgm <- variogram(windspeed ~ 1, data = sf_observations)
-
-# Fit spherical variogram model to calculate sill and range
-od_kriging.vgm.fit <- fit.variogram(od_kriging.vgm, vgm(348.342080, "Sph", 40943.119350))
-
-
-```
-
-### 3.4.2 Train ordinary kriging model
-
-```{r train_ordinary_kriging_models}
-
-od_kriging.model <- gstat(
-  formula = windspeed ~ 1,
-  data = sf_observations,
-  nmax = 5,
-  model = od_kriging.vgm.fit
+model_rmse_values <- c(
+  results.trend_surface.linear.rmse,
+  results.trend_surface.hyperbolic.rmse,
+  results.mqrbf.rmse,
+  results.idw.rmse,
+  results.od_kriging.rmse,
+  results.u_kriging.linear.rmse,
+  results.u_kriging.hyperbolic.rmse
 )
 
-```
+model_nrmse_values <- c(
+  results.trend_surface.linear.nrmse,
+  results.trend_surface.hyperbolic.nrmse,
+  results.mqrbf.nrmse,
+  results.idw.nrmse,
+  results.od_kriging.nrmse,
+  results.u_kriging.linear.nrmse,
+  results.u_kriging.hyperbolic.nrmse
+)
 
-
-### 3.4.3 Predict surfaces with ordinary kriging models
-
-```{r pred_universal_kriging_surfaces}
-
-od_kriging.model.preds <- as.data.frame(predict(od_kriging.model, sf_receptors))
-
-```
-
-
-### 3.4.4 Show predictions in map
-
-```{r show_ordinry_kriging_surfaces}
-
-show_prediction_map(od_kriging.model.preds$var1.pred)
-
-```
-
-- Results show little to no difference in range of values, therefor it can be assumed that impact of seasonal or anual mean on ordinary kriging is minimal. 
-
-### 3.4.5 Validate results
-
-```{r validate_simple_kriging_model, echo=FALSE}
-
-od_kriging.cv <- gstat.cv(od_kriging.model, nfold = nrow(sf_observations))
-
-```
-
-```{r calc_nrmse_simple_kriging_model}
-
-od_kriging.rsme <- calc_rmse(od_kriging.cv$residual)
-od_kriging.nrsme <- calc_nrmse(od_kriging.rsme, sf_observations$windspeed)
-
-print(sprintf(
-  "Ordinary kriging [n=5, vgm=(348.342080, 'Sph', 40943.119350)]: rmse=%f nrmse=%f", 
-  od_kriging.rsme, 
-  od_kriging.nrsme
-))
-
-```
-
-
-
-
-### 3.5 Universal kriging
-#### 3.5.1 Fit variogram model for universal kriging
-
-```{r universal_kriging_model_prepare}
-
-sf_observations_u <- sf_observations %>%
-  mutate( 
-    x = st_coordinates(.)[,1],
-    y = st_coordinates(.)[,2]
+results.all_models <- 
+  data.frame(
+    model_name = model_names,
+    model_weight = model_weights,
+    rmse = model_rmse_values,
+    nrmse = model_nrmse_values
   )
 
-sf_receptors_u <- sf_receptors %>%
-  mutate( 
-    x = st_coordinates(.)[,1],
-    y = st_coordinates(.)[,2]
-  )
 ```
 
-```{r fit_universal_kriging_variogram, warning=FALSE}
+```{r show_rmse_nrmse_results}
 
-# Create variogram
-u_kriging.vgm <- variogram(windspeed ~ x + y, data = sf_observations_u)
-
-# Fit spherical variogram model to calculate sill and range
-u_kriging.vgm.fit <- fit.variogram(u_kriging.vgm, vgm(292.1622, "Sph", 40943.12))
+results.all_models
 
 ```
-
-
-#### 3.5.2 Train universal kriging models
-
-```{r universal_kriging_model}
-
-u_kriging.model_linear <- gstat(
-  formula = windspeed ~ x + y,
-  data = sf_observations_u,
-  nmax = 5,
-  model = u_kriging.vgm.fit
-)
-
-u_kriging.model_cubic <- gstat(
-  formula = windspeed ~ abs(x + y + (x^2) + (x * y) + (y^2) + (x^3) + ((x^2) * y) + (x * (y^2)) + (y^3)),
-  data = sf_observations_u,
-  nmax = 5,
-  model = u_kriging.vgm.fit
-)
-
-```
-
-#### 3.5.3 Predict surface using universal kriging model
-
-```{r preds_universal_kriging}
-
-u_kriging.model_linear.preds <- as.data.frame(predict(u_kriging.model_linear, sf_receptors_u))
-u_kriging.model_cubic.preds <- as.data.frame(predict(u_kriging.model_cubic, sf_receptors_u))
-
-```
-
-#### 3.5.4 Show predictions in map
-
-```{r show_universal_kriging_surfaces}
-
-show_prediction_map(u_kriging.model_linear.preds$var1.pred)
-show_prediction_map(u_kriging.model_cubic.preds$var1.pred)
-
-```
-
-#### 3.5.5 Validate results
-
-```{r validate_universal_kriging}
-
-u_kriging.cv.linear <- gstat.cv(u_kriging.model_linear, nfold = nrow(sf_observations_u))
-u_kriging.cv.cubic <- gstat.cv(u_kriging.model_cubic, nfold = nrow(sf_observations_u))
-
-```
-
-```{r calc_nrsme_universal_kriging}
-
-u_kriging.rsme.linear <- calc_rmse(u_kriging.cv.linear$residual)
-u_kriging.rsme.cubic <- calc_rmse(u_kriging.cv.cubic$residual)
-
-u_kriging.nrsme.linear <- calc_nrmse(u_kriging.rsme.linear, sf_observations_u$windspeed)
-u_kriging.nrsme.cubic <- calc_nrmse(u_kriging.rsme.cubic, sf_observations_u$windspeed)
-
-print("Universal kriging [n=5, vgm=(292.1622, 'Sph', 40943.12)]")
-
-print(sprintf(
-  "[model='Linear']: rmse=%f nrmse=%f", 
-  u_kriging.rsme.linear, u_kriging.nrsme.linear
-))
-
-print(sprintf(
-  "[model='Cubic']: rmse=%f nrmse=%f", 
-  u_kriging.rsme.cubic, u_kriging.nrsme.cubic
-))
-
-
-```
-
-
-
-
-
-
