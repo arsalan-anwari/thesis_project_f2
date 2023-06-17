@@ -16,6 +16,7 @@ knitr::opts_chunk$set(echo = TRUE)
 
 library(tidyverse)
 library(sf)
+library(gridExtra) # to create nxn facets for ggplot
 
 library(conflicted)
 conflict_prefer("filter", "dplyr")
@@ -28,6 +29,8 @@ conflict_prefer("lag", "dplyr")
 ```{r load_data}
 
 sf_oberservations_train <- readRDS("Data/knmi_windspeed_observations_training_set.rds")
+sf_observations_anual <- readRDS("Data/knmi_windspeed_complete_set.rds")
+
 ls_training_results <- readRDS("Data/dynamic_training_routine_training_results.rds")
 ls_training_settings <- readRDS("Data/dynamic_training_routine_training_settings.rds")
 
@@ -175,8 +178,7 @@ df_training_results.u_kriging
 ```
 
 
-# 2. Data Analysis
-
+# 2. Analyse RMSE results of training set
 
 ## 2.1 Find weights with lowest RMSE per model variation for training set 
 
@@ -225,7 +227,7 @@ df_lowest_rmse_per_opt.u_kriging
 
 ```
 
-## 2.1 Save results of combination of weight and variation with lowest RMSE per model
+## 2.2 Save results of combination of weight and variation with lowest RMSE per model
 
 ```{r find_lowest_rmse_combo}
 
@@ -241,14 +243,273 @@ saveRDS(save.weights_with_lowest_rmse_per_opt, "Data/weights_with_lowest_rmse_pe
 
 ```
 
+## 2.3 Show fluctuations of new weights and its effect on RMSE
+
+- Measurements of the IDW model where chosen as they showed the highest amount of fluctuation per model variation
+
+```{r prepare_fluctuation_measurements_idw}
+
+df_idw_training_flucts <- df_training_results.idw %>%
+  select(model_opt_id, train_iteration, idp, new_rmse) %>%
+  mutate(
+    neighbors = ls_training_settings$neighbor_range[model_opt_id],
+    neighbors = as.character(neighbors)
+    ) %>%
+  rename(rmse = new_rmse)
+
+df_idw_training_flucts
+
+summary(df_idw_training_flucts$rmse)
+
+```
+
+```{r plot_fluctuation_measurements_idw}
+
+plot_train_results <- df_idw_training_flucts %>% 
+  ggplot( aes(x = train_iteration, y = rmse, fill = neighbors, linetype = factor(neighbors)) ) +
+  geom_line(position = "identity", linewidth = 0.5) +
+  scale_fill_grey(start = 0.1, end = 0.9) +
+  labs(title = "Training results (IDW)", linetype = "neighbors") +
+  theme_bw() +
+  theme(legend.position = "bottom", legend.direction = "horizontal")
+
+plot_weight_effect <- df_idw_training_flucts %>% 
+  ggplot( aes(x = train_iteration, y = idp, fill = neighbors, linetype = factor(neighbors)) ) +
+  geom_line(position = "identity", linewidth = 0.5) +
+  scale_y_continuous(position = "right") +
+  scale_fill_grey(start = 0.1, end = 0.9) +
+  labs(title = "IDP weights (IDW)", linetype = "neighbors") +
+  theme_bw() + 
+  theme(legend.position = "bottom", legend.direction = "horizontal")
 
 
+grid.arrange(plot_train_results, plot_weight_effect, ncol = 2)
 
 
+```
+
+# 3. Analyse spatial interpolation metrics
+
+## 3.1 Prepare dataset for different metrics
+
+### 3.1.1 Seasonal set
+```{r define_season_set_days}
+
+season_set_days.spring <- as.Date(c(
+  "2017-03-01", "2017-03-08", "2017-03-15", "2017-03-22",
+  "2017-04-01", "2017-04-08", "2017-04-15", "2017-04-22",
+  "2017-05-01", "2017-05-08", "2017-05-15", "2017-05-22"
+))
+
+season_set_days.summer <- as.Date(c(
+  "2017-06-01", "2017-06-08", "2017-06-15", "2017-06-22",
+  "2017-07-01", "2017-07-08", "2017-07-15", "2017-07-22",
+  "2017-08-01", "2017-08-08", "2017-08-15", "2017-08-22"
+))
+
+season_set_days.autumn <- as.Date(c(
+  "2017-09-01", "2017-09-08", "2017-09-15", "2017-09-22",
+  "2017-10-01", "2017-10-08", "2017-10-15", "2017-10-22",
+  "2017-11-01", "2017-11-08", "2017-11-15", "2017-11-22"
+))
+
+season_set_days.winter <- as.Date(c(
+  "2017-12-01", "2017-12-08", "2017-12-15", "2017-12-22",
+  "2017-01-01", "2017-01-08", "2017-01-15", "2017-01-22",
+  "2017-02-01", "2017-02-08", "2017-02-15", "2017-02-22"
+))
+
+```
+
+```{r create_seasonal_set}
+
+sf_seasonal_set.spring <- sf_observations_anual %>%
+  filter( date %in% season_set_days.spring )
+
+sf_seasonal_set.summer <- sf_observations_anual %>%
+  filter( date %in% season_set_days.summer )
+
+sf_seasonal_set.autumn <- sf_observations_anual %>%
+  filter( date %in% season_set_days.autumn )
+
+sf_seasonal_set.winter <- sf_observations_anual %>%
+  filter( date %in% season_set_days.winter )
+
+```
+
+### 3.1.2 Annual set
+
+```{r define_annual_set_days}
+
+gen_annuals_set_days <- function(){
+  start_date <- as.Date("2017-01-01")
+  out <- rep(NA, times = 48)
+
+  i <- 1
+  for(m in 0:11){
+    for(d in 1:4){
+      new_date <- start_date + months(m) + days(d)
+      out[i] <- format(new_date, "%Y-%m-%d")
+      i <- i + 1
+    }
+  }
+
+  return(as.Date(out))
+}
+
+annual_set_days <- gen_annuals_set_days()
+
+print(annual_set_days)
+
+```
+
+```{r create_annual_set}
+
+sf_annual_set <- sf_observations_anual %>%
+  filter( date %in% annual_set_days )
+
+```
+
+### 3.1.3 Random set
+
+```{r define_random_set_days}
+
+gen_random_set_days <- function(){
+  set.seed(242534327)
+  
+  start_date <- as.Date("2017-01-01")
+  out <- rep(NA, times = 48)
+
+  for(i in 1:48){
+    rand_day <- as.integer(runif(1, min=0, max=28))
+    rand_month <- as.integer(runif(1, min=0, max=11))
+    new_date <- start_date + months(rand_month) + days(rand_day)
+    out[i] <- format(new_date, "%Y-%m-%d")
+  }
+
+  return(as.Date(out))
+}
+
+random_set_days <- gen_annuals_set_days()
+print(random_set_days)
+
+```
+
+```{r create_random_set}
+
+sf_random_set <- sf_observations_anual %>%
+  filter( date %in% random_set_days )
+
+```
+
+### 3.1.4 Clustered set
+
+```{r create_sample_map}
+
+sf_sample_map <- sf_observations_anual %>%
+  filter( date == as.Date("2017-01-01") )
+
+sf_sample_map
+
+```
+
+```{r plot_sample_map}
+
+sf_sample_map %>%
+  ggplot() +
+    geom_sf(alpha = 0.0) +
+    geom_sf_text(aes(label = station_code), size = 3) +
+    theme_void()
+
+```
+As you can see from the plot, the following stations are in or near the province of Zeeland:
+	- 312, 316, 324, 331, 340, 315, 310, 313, 308, 319, 330, 343
+	
+```{r define_clustered_set_days}
+
+gen_clustered_set_days <- function(){
+  set.seed(35433)
+  
+  start_date <- as.Date("2017-01-01")
+  out <- rep(NA, times = 48)
+
+  for(i in 1:48){
+    rand_day <- as.integer(runif(1, min=0, max=28))
+    rand_month <- as.integer(runif(1, min=0, max=11))
+    new_date <- start_date + months(rand_month) + days(rand_day)
+    
+    out[i] <- format(new_date, "%Y-%m-%d")
+  }
+
+  return(as.Date(out))
+}
+
+clustered_set_days <- gen_clustered_set_days()
+print(clustered_set_days)
+
+```
+	
+```{r create_clustered_set}
+
+clustered_set_stations <- c(312, 316, 324, 331, 340, 315, 310, 313, 308, 319, 330, 343)
+
+sf_clustered_set <- sf_observations_anual %>%
+  filter( date %in% clustered_set_days & station_code %in% clustered_set_stations )
+
+```
+	
+### 3.1.5 Sparse set
+
+Based on the map shown in 3.1.4 the following stations where selected from the center and north of the Netherlands for the sparse set
+- Center: 260, 269, 275, 375, 215, 240
+- North: 270, 280, 279, 273, 267, 242
+
+The stations 260 and 270 can be seen as the center point where de distance between them and the other points is maximized.
+	
+```{r create_sparse_set}
+
+sparse_set_stations <- c(260, 269, 275, 375, 215, 240, 270, 280, 279, 273, 267, 242)
+
+sf_sparse_set <- sf_observations_anual %>%
+  filter( date %in% clustered_set_days & station_code %in% sparse_set_stations )
+
+```
 
 
+### 3.1.6 Check if sets have correct sizes	
+	
+```{r compare_set_sizes}
+
+station_count <- length(unique(sf_observations_anual$station_code))
+all_season_set_size <- (
+  length(unique(sf_seasonal_set.spring$date)) +
+  length(unique(sf_seasonal_set.summer$date)) + 
+  length(unique(sf_seasonal_set.autumn$date)) + 
+  length(unique(sf_seasonal_set.winter$date))
+)
+
+cat(sprintf(
+  "
+  Anual set days = %d
+  Seasonal set days = %d
+    Seasonal days [spring] = %d
+    Seasonal days [summer] = %d
+    Seasonal days [autumn] = %d
+    Seasonal days [winter] = %d
+  Random set days = %d
+  Clustered set days = %d
+  Sparse set days = %d
+  ",
+  length(unique(sf_annual_set$date)), 
+  all_season_set_size,
+    length(unique(sf_seasonal_set.spring$date)),
+    length(unique(sf_seasonal_set.summer$date)),
+    length(unique(sf_seasonal_set.autumn$date)),
+    length(unique(sf_seasonal_set.winter$date)),
+  length(unique(sf_random_set$date)),
+  length(unique(sf_clustered_set$date)),
+  length(unique(sf_sparse_set$date))
+))
 
 
-
-
-
+```

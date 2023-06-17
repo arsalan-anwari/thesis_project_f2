@@ -267,7 +267,16 @@ sf_receptors <- sf_receptors %>%
 
 ## 2.7 Prepare and save data for other R scripts like dynamic model traning routine
 
-```{r split_sf_coords_to_df}
+```{r ceate_annual_observations}
+
+sf_observations_anual <- df_knmi_stations %>% 
+  st_as_sf(coords = c("x", "y")) %>%
+  st_set_crs(4326) %>% # WGS-84
+  st_transform(crs_source)
+
+```
+
+```{r split_sf_coords}
 
 sf_receptors <- sf_receptors %>%
   mutate(
@@ -281,11 +290,18 @@ sf_observations <- sf_observations %>%
     y = st_coordinates(.)[,2]
   )
 
+sf_observations_anual <- sf_observations_anual %>%
+  mutate(
+    x = st_coordinates(.)[,1],
+    y = st_coordinates(.)[,2]
+  )
+
 ```
 
 ```{r save_data_for_dynamic_training}
 
-saveRDS(sf_observations, "Data/knmi_windspeed_observations_training_set")
+saveRDS(sf_observations, "Data/knmi_windspeed_observations_training_set.rds")
+saveRDS(sf_observations_anual, "Data/knmi_windspeed_complete_set.rds")
 
 ```
 
