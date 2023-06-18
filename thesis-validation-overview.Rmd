@@ -31,8 +31,8 @@ conflict_prefer("lag", "dplyr")
 sf_oberservations_train <- readRDS("Data/knmi_windspeed_observations_training_set.rds")
 sf_observations_anual <- readRDS("Data/knmi_windspeed_complete_set.rds")
 
-ls_training_results <- readRDS("Data/dynamic_training_routine_training_results.rds")
-ls_training_settings <- readRDS("Data/dynamic_training_routine_training_settings.rds")
+ls_training_results <- readRDS("Data/dynamic_training_routine_training_results_annual_avg.rds")
+ls_training_settings <- readRDS("Data/dynamic_training_routine_training_settings_annual_avg.rds")
 
 ```
 

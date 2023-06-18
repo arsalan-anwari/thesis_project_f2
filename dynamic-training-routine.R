@@ -1,3 +1,10 @@
+# !!!!!! ============================================  NOTES ============================================ !!!!!!
+# This simulation only shows results for a single day on 01-01-2017 to make it easier to run on your computer.
+# In reality I have taken results for the entire year and averaged the computed weights for each model 
+# These averaged weights should be the 'best' for each random day throughout the year.
+# This saves time in the OBOmod dispersion model to calculate ideal weights for each day individually
+# !!!!!! ================================================================================================ !!!!!!
+
 # ====================== SIMULATION DATA LOAD (START) ======================
 
   # Load libraries 
@@ -14,7 +21,7 @@
   set.seed(73829)
   
   # Load data
-  sf_observations <- readRDS("Data/knmi_windspeed_observations_january_01.rds")
+  sf_observations <- readRDS("Data/knmi_windspeed_observations_training_set.rds")
   
   # Split x and y coordinate from observations and receptors as separate columns
   sf_observations <- sf_observations %>%
@@ -473,8 +480,8 @@
     regression_models = settings.model_opt.polynomial_formulas
   )
   
-  saveRDS(save.training_results, "Data/dynamic_training_routine_training_results.rds")
-  saveRDS(save.settings, "Data/dynamic_training_routine_training_settings.rds")
+  saveRDS(save.training_results, "Data/dynamic_training_routine_training_results_single_day.rds")
+  saveRDS(save.settings, "Data/dynamic_training_routine_training_settings_single_day.rds")
     
 # ====================== SIMULATION DATA SAVE (END) ======================
 

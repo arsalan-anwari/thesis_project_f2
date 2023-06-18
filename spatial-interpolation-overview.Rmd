@@ -7,6 +7,9 @@ output: html_document
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+
+setwd("C:/Users/arsal/Workspaces/thesis_project_f2")
+
 ```
 
 
@@ -18,7 +21,10 @@ knitr::opts_chunk$set(echo = TRUE)
 library(jsonlite) # used for wind speed data of knmi station
 library(sf) # used to load maps and manipulate spatial features
 
-library(ggplot2) # used to plot maps and other figures
+# used to plot maps and other figures
+library(ggplot2)
+library(gridExtra) # to create nxn facets for ggplot
+
 library(tidyverse) # used for piping functionality of data manipulation functions
 
 # Used to fix conflicted packages of dplyr
@@ -305,55 +311,15 @@ saveRDS(sf_observations_anual, "Data/knmi_windspeed_complete_set.rds")
 
 ```
 
+# 3. Spatial intepolation methods
 
-# 3. Prepare spatial interpolation
-## 3.1 Define helper functions
+A total of 6 spatial interpolation models are tested with "optimal" weights and no weights added. The optimal weights were calculated using the code in `dyanmic-training-routine.R`. 
+- In chapter 5 The RMSE and NRMSE of the weighted and non-weighted models are calculated. 
+- Chapter 6 compares the best case and average case models by showing their differences in RMSE and NRMSE and by plotting predicted surfaces on a map. 
 
-```{r plot_observations}
+The optimal weights are calculated such that they perform well on average across all available days in the year 2017. For some models it is possible that omitting the weights will actual yield a lower RMSE for a **specific** day but generally speaking will yield a higher RMSE on average when taking **all** days into account. 
 
-show_prediction_map <- function(observation_variables, title_text, caption_text){
-
-  sf_netherlands_receptor_grid$windspeed <- 0
-  sf_netherlands_receptor_grid$windspeed <- as.factor(ceiling(observation_variables / 10))
-
-  map_plot <- ggplot() +
-    geom_sf(
-      data = sf_netherlands_receptor_grid,
-      aes(fill = windspeed)
-    ) +
-    scale_fill_grey(start = 0.1, end = 0.9) +
-    labs(title = title_text, fill = "windspeed (m/s)", caption = caption_text) +
-    theme_bw()
-  
-  print(map_plot)
-}
-
-```
-
-
-```{r calc_nrmse}
-
-calc_rmse <- function(residuals) {
-  return(sqrt(sum((residuals)^2)/length(residuals)))
-}
-
-calc_nrmse <- function(rmse, observations){
-  return( rmse / sd(observations$windspeed) )
-}
-
-```
-
-```{r train_gstat_cv}
-
-train.gstat <- function(model){
-  { sink(nullfile()); cv <- gstat.cv(model, nfold = nrow(sf_observations), verbose=FALSE); sink(); }  
-  return( list(residuals = cv$residual) )
-}
-
-```
-
-
-## 3.2 Show best combination of weights and settings for spatial interpolation of training set
+## 3.1 Show best combination of weights and settings for spatial interpolation of training set
 
 ```{r show_best_weights_per_model_variation}
 
@@ -365,164 +331,174 @@ ls_best_rmse_weights$u_kriging
 
 ```
  
-Based on these results surfaces will be generated using the following models:
+Based on these results best case models will use the following weights in this manner:
 - Linear and hyperbolic trend surface using `weights = (1/windspeed) + case_weight`
 - MQ-RBF model with an `alpha_seed = 1.166434` and `smoothing_factor = 90.770461`
 - IDW model using `nmax=6` and `idp=1.028791`
 - Ordinary kriging using spherical variogram using `vgm(base_range + 36.41014, "Sph", base_psill + 0.3641014)` where `base_range` and `base_psill` where pre-calculated by fitting the variogram using `fit.variogram(...)` and `nmax=6`
 - Universal kriging with linear and hyperbolic regression model using `psill=0.4390736, range=43.90736, nmax=6` and `psill=0.5031153, range=50.31153, nmax=6`. 
 
-
-# 4. Perform spatial interpolation
-## 4.1 Train spatial interpolation models
-### 4.1.1 Trend surface 
+## 3.2 Train spatial interpolation models
+### 3.2.1 Trend surface 
 
 ```{r trend_surface_train}
 
-model.trend_surface.linear <- lm(
+model.trend_surface.linear.best_case <- lm(
   formula = windspeed ~ x + y,
   data = sf_observations,
   weights = (1 / windspeed) + 1.151302
 )
 
-model.trend_surface.hyperbolic <- lm(
+model.trend_surface.hyperbolic.best_case <- lm(
   formula = windspeed ~ x + y + I(x^2) + (x * y) + I(y^2) + I(x^3) + (I(x^2) * y) + (x * I(y^2)) + I(y^3),
   data = sf_observations,
   weights = (1 / windspeed) + 1.000508
 )
 
-summary(model.trend_surface.linear)
-summary(model.trend_surface.hyperbolic)
+model.trend_surface.linear.avg_case <- lm(
+  formula = windspeed ~ x + y,
+  data = sf_observations
+)
+
+model.trend_surface.hyperbolic.avg_case <- lm(
+  formula = windspeed ~ x + y + I(x^2) + (x * y) + I(y^2) + I(x^3) + (I(x^2) * y) + (x * I(y^2)) + I(y^3),
+  data = sf_observations
+)
+
+summary(model.trend_surface.linear.best_case)
+summary(model.trend_surface.hyperbolic.best_case)
+summary(model.trend_surface.linear.avg_case)
+summary(model.trend_surface.hyperbolic.avg_case)
 
 ```
 
-### 4.1.2 MQ-RBF
+### 3.2.2 MQ-RBF
 
-```{r mqrbf_model_train_define}
+```{r mqrbf_model_load}
 
-mqrbf.calc_alpha_weights <- function(data, alpha_seed, smoothing_factor) {
-  n <- nrow(data)
-  K <- matrix(0, n, n)
-  for (i in 1:n) {
-    for (j in 1:n) {
-      K[i,j] <- sqrt(
-        1 + ( alpha_seed * 
-          ( (sqrt( 
-              ( ( data$x[i] - data$x[j] )^2 ) + 
-              ( ( data$y[i] - data$y[j] )^2 ) 
-            )^2) 
-          ) 
-        )
-      )
-      
-    }
-  }
-  
-  alpha_weights <- solve(K) %*% data$windspeed
-  alpha_weights <- as.vector(alpha_weights)
-  
-  return(list(
-    data = data, 
-    alpha_weights = alpha_weights, 
-    alpha_seed = alpha_seed, 
-    smoothing_factor = smoothing_factor
-  ))
-}
+source("mqrbf-model-simple.R")
+args(mqrbf) # Used to define model
+args(predict.mqrbf) # Used to predict surface
+args(train.mqrbf) # Used for SLOO-CV 
 
 ```
 
 ```{r mqrbf_train}
 
-model.mqrbf <- mqrbf.calc_alpha_weights(
+model.mqrbf.best_case <- mqrbf(
     data = sf_observations, 
     alpha_seed = 1.166434,
     smoothing_factor = 90.770461
 )
 
-summary(model.mqrbf$alpha_weights)
+model.mqrbf.avg_case <- mqrbf(data = sf_observations)
+
+summary(model.mqrbf.best_case$alpha_weights)
+cat("\n")
+summary(model.mqrbf.avg_case$alpha_weights)
 
 ```
 
-### 4.1.3 IDW
+### 3.2.3 IDW
 
 ```{r idw_train}
 
-model.idw <- gstat(
+model.idw.best_case <- gstat(
   formula = windspeed ~ 1,
   data = sf_observations,
   nmax = 6,
   set = list(idp = 1.028791)
 )
 
+model.idw.avg_case <- gstat(
+  formula = windspeed ~ 1,
+  data = sf_observations,
+  nmax = 6,
+  set = list(idp = 1.0)
+)
 
+model.idw.best_case
+cat("\n")
+model.idw.avg_case
 ```
 
-
-### 4.1.4 Ordinary kriging
+### 3.2.4 Ordinary kriging
 
 ```{r od_kriging_vgm_train}
 
 vgm.od_kriging <- variogram(windspeed ~ 1, data = sf_observations)
-model.od_kriging.vgm <- suppressWarnings(fit.variogram(vgm.od_kriging, vgm("Sph")))
+model.od_kriging.vgm.avg_case <- suppressWarnings(fit.variogram(vgm.od_kriging, vgm("Sph")))
 
-base_psill <- model.od_kriging.vgm$psill[1]
-base_range <- model.od_kriging.vgm$range[2]
+best_psill <- model.od_kriging.vgm.avg_case$psill[1] + 0.3641014
+best_range <- model.od_kriging.vgm.avg_case$range[2] + 36.41014
 
-model.od_kriging.vgm.linear <- suppressWarnings(
-  fit.variogram(vgm.od_kriging, vgm(
-    psill = base_psill + 0.3641014, 
-    model = "Sph", 
-    range = base_range + 36.41014
-    )
-  )
+model.od_kriging.vgm.best_case <- suppressWarnings(
+  fit.variogram(vgm.od_kriging, vgm(best_psill, model = "Sph", best_range))
 )
 
-model.od_kriging.vgm
+cat(sprintf("
+  avg_psill = %f; best_psill = %f
+  avg_range = %f; best_range = %f
+", 
+  model.od_kriging.vgm.avg_case$psill[1], best_psill, 
+  model.od_kriging.vgm.avg_case$range[2], best_range
+))
 
 ```
 
 ```{r od_kriging_train}
 
-model.od_kriging <- gstat(
+model.od_kriging.best_case <- gstat(
   formula = windspeed ~ 1,
   data = sf_observations,
   nmax = 6,
-  model = model.od_kriging.vgm
+  model = model.od_kriging.vgm.best_case
+)
+
+model.od_kriging.avg_case <- gstat(
+  formula = windspeed ~ 1,
+  data = sf_observations,
+  nmax = 6,
+  model = model.od_kriging.vgm.avg_case
 )
 
 ```
 
 
-### 4.1.5 Universal kriging
+### 3.2.5 Universal kriging
 
 ```{r u_kriging_vgm_train}
 
 vgm.u_kriging <- variogram(windspeed ~ x + y, data = sf_observations)
-model.u_kriging.vgm <- suppressWarnings(fit.variogram(vgm.u_kriging, vgm("Sph")))
+model.u_kriging.vgm.avg_case <- suppressWarnings(fit.variogram(vgm.u_kriging, vgm("Sph")))
 
-base_psill <- model.u_kriging.vgm$psill[1]
-base_range <- model.u_kriging.vgm$range[2]
+best_psill.linear <- model.u_kriging.vgm.avg_case$psill[1] + 0.4390736
+best_range.linear <- model.u_kriging.vgm.avg_case$range[2] + 43.90736
+best_psill.hyperbolic <- model.u_kriging.vgm.avg_case$psill[1] + 0.5031153
+best_range.hyperbolic <- model.u_kriging.vgm.avg_case$range[2] + 50.31153
 
-model.u_kriging.vgm.linear <- suppressWarnings(
-  fit.variogram(vgm.u_kriging, vgm(
-    psill = base_psill + 0.4390736, 
-    model = "Sph", 
-    range = base_range + 43.90736
-    )
-  )
+model.u_kriging.vgm.best_case.linear <- suppressWarnings(
+  fit.variogram(vgm.od_kriging, vgm(best_psill.linear, model = "Sph", best_range.linear))
 )
 
-model.u_kriging.vgm.hyperbolic <- suppressWarnings(
-  fit.variogram(vgm.u_kriging, vgm(
-    psill = base_psill + 0.5031153, 
-    model = "Sph", 
-    range = base_range + 50.31153
-    )
-  )
+model.u_kriging.vgm.best_case.hyperbolic <- suppressWarnings(
+  fit.variogram(vgm.od_kriging, vgm(best_psill.hyperbolic, model = "Sph", best_range.hyperbolic))
 )
 
-model.u_kriging.vgm.linear
-model.u_kriging.vgm.hyperbolic
+cat(sprintf("
+  [Linear]
+  avg_psill = %f; best_psill = %f
+  avg_range = %f; best_range = %f
+  
+  [Hyperbolic]
+  avg_psill = %f; best_psill = %f
+  avg_range = %f; best_range = %f
+", 
+  model.u_kriging.vgm.avg_case$psill[1], best_psill.linear, 
+  model.u_kriging.vgm.avg_case$range[2], best_range.linear,
+  model.u_kriging.vgm.avg_case$psill[1], best_psill.hyperbolic, 
+  model.u_kriging.vgm.avg_case$range[2], best_range.hyperbolic
+))
 
 ```
 - The syntax for a `formula` in the `variogram()` function is unconventional. Here `windspeed ~ x+y` simply indicates "variogram optimized for universal kriging" and `windspeed ~ 1` indicates simple or ordinary kriging.  
@@ -530,210 +506,71 @@ model.u_kriging.vgm.hyperbolic
 
 ```{r u_kriging_train}
 
-model.u_kriging.linear <- gstat(
+model.u_kriging.linear.best_case <- gstat(
   formula = windspeed ~ x + y,
   data = sf_observations,
   nmax = 6,
-  model = model.u_kriging.vgm.linear
+  model = model.u_kriging.vgm.best_case.linear
 )
 
-model.u_kriging.hyperbolic <- gstat(
+model.u_kriging.hyperbolic.best_case <- gstat(
   formula = windspeed ~ abs(x + y + (x^2) + (x * y) + (y^2) + (x^3) + ((x^2) * y) + (x * (y^2)) + (y^3)),
   data = sf_observations,
   nmax = 6,
-  model = model.u_kriging.vgm.hyperbolic
+  model = model.u_kriging.vgm.best_case.hyperbolic
+)
+
+model.u_kriging.linear.avg_case <- gstat(
+  formula = windspeed ~ x + y,
+  data = sf_observations,
+  nmax = 6,
+  model = model.u_kriging.vgm.avg_case
+)
+
+model.u_kriging.hyperbolic.avg_case <- gstat(
+  formula = windspeed ~ abs(x + y + (x^2) + (x * y) + (y^2) + (x^3) + ((x^2) * y) + (x * (y^2)) + (y^3)),
+  data = sf_observations,
+  nmax = 6,
+  model = model.u_kriging.vgm.avg_case
 )
 
 ```
 - The syntax for the `formula` parameter is unconventional in the `gstat()` function. Exponents do not need a `I(x^n)` clause and `abs()` is used to indicate that a higher order polynomial regression model is used without auxiliary variables. To use auxiliary variables for something like co-kriging you need to remove the `abs(....)` and use `log(windspeed)`.    
 
 
-## 4.2 Predict receptor points to create surface
+# 5. Calculate RMSE and NRMSE for each model
+## 5.1 Define helper functions 
+### 5.1.1 RMSE and NRMSE functions
+```{r calc_nrmse}
 
-### 4.2.1 Trend surface
-```{r trend_surface_predict}
-
-preds.trend_surface.linear <- predict(model.trend_surface.linear, sf_receptors)
-preds.trend_surface.hyperbolic <- predict(model.trend_surface.hyperbolic, sf_receptors)
-
-summary(preds.trend_surface.linear)
-summary(preds.trend_surface.hyperbolic)
-
-```
-
-### 4.2.2 MQ-RBF
-
-```{r mqrbf_predict_model_define}
-
-mqrbf.calc_distance <- function(r, c){
-  return ( sqrt( (r^2) + (c^2) ) )
+calc_rmse <- function(residuals) {
+  return(sqrt(sum((residuals)^2)/length(residuals)))
 }
 
-predict.mqrbf <- function(object, newdata){
-  
-  x_receptors <- newdata$x
-  y_receptors <- newdata$y
-  x_observations <- object$data$x
-  y_observations <- object$data$y
-  alpha_weights <- object$alpha_weights
-  smoothing_factor <- object$smoothing_factor
-  
-  n_i <- length(x_receptors)
-  n_j <- length(x_observations)
-  
-  # value of 0.05 is to ensure that a float is used and not int. 
-  # Values ({0.0 ... 0.009} == 0) in rep() function of R.
-  z <- rep(0.01, n_i)  
-  
-  for(i in 1:n_i) {
-    x_new <- x_receptors[i]
-    y_new <- y_receptors[i]
-    z_new <- 0
-    for(j in 1:n_j) {
-      weight_j <- alpha_weights[j]
-  
-      x_j <- x_observations[j]
-      y_j <- y_observations[j]
-  
-      r <- sqrt( ((x_j-x_new)^2) + ((y_j-y_new)^2) )
-      m_distance <- mqrbf.calc_distance(r, smoothing_factor)
-  
-      z_new <- z_new + (weight_j * m_distance)
-    }
-    z[i] <- z_new
-  }
-  
-  return(z)
-  
+calc_nrmse <- function(rmse){
+  return( rmse / sd(sf_observations$windspeed) )
 }
 
-
 ```
 
-```{r mqrbf_predict}
+### 5.1.2 Decorator for SLOO-CV crossvalidation function for models using `gstat` library
+```{r train_gstat_cv}
 
-preds.mqrbf <- predict.mqrbf(model.mqrbf, sf_receptors)
-
-summary(preds.mqrbf)
-
-```
-
-### 4.2.3 IDW
-
-```{r idw_predict}
-
-preds.idw <- predict(model.idw, sf_receptors)$var1.pred
-summary(preds.idw)
+train.gstat <- function(model){
+  { sink(nullfile()); cv <- gstat.cv(model, nfold = nrow(sf_observations), verbose=FALSE); sink(); }  
+  return( list(residuals = cv$residual) )
+}
 
 ```
+- The `gstat.cv()` function has the tendency to output all training epochs in the terminal, making for unnecessary long knitted html files. Using `sink(nullfile())` is equivalent to piping all output of a command to `/dev/null`. This removes the output visually in the generated html file.   
 
-### 4.2.4 Ordinary kriging
-
-```{r od_kriging_predict}
-
-preds.od_kriging <- predict(model.od_kriging, sf_receptors)$var1.pred
-summary(preds.od_kriging)
-
-```
-
-### 4.2.5 Universal kriging
-
-```{r od_kriging_predict}
-
-preds.u_kriging.linear <- predict(model.u_kriging.linear, sf_receptors)$var1.pred
-preds.u_kriging.hyperbolic <- predict(model.u_kriging.hyperbolic, sf_receptors)$var1.pred
-
-summary(preds.u_kriging.linear)
-summary(preds.u_kriging.hyperbolic)
-
-```
-
-
-
-
-## 4.3 Show generated surfaces
-
-### 4.3.1 Trend surface
-
-```{r show_preds_trend_surface}
-
-show_prediction_map(
-  preds.trend_surface.linear,
-  title_text = "Trend surface (1st order)",
-  caption_text = "case_weight = 1.151302"
-)
-
-show_prediction_map(
-  preds.trend_surface.hyperbolic,
-  title_text = "Trend surface (3rd order)",
-  caption_text = "case_weight = 1.000508"
-)
-
-```
-
-
-### 4.3.2 MQ-RBF
-
-```{r show_preds_mqrbf}
-
-show_prediction_map(
-  preds.mqrbf,
-  title_text = "MQ-RBF",
-  caption_text = "alpha_seed = 1.166434; smoothing_factor = 90.770461"
-)
-
-```
-
-### 4.3.3 IDW
-
-```{r show_preds_idw}
-
-show_prediction_map(
-  preds.idw,
-  title_text = "IDW",
-  caption_text = "nmax=6; idp=1.028791"
-)
-
-```
-
-### 4.3.4 Ordinary kriging
-
-```{r show_preds_od_kriging}
-
-show_prediction_map(
-  preds.od_kriging,
-  title_text = "Ordinary Kriging",
-  caption_text = "vgm=\"Sph\"; psill=348.3421; range=40943.12; nmax=6"
-)
-
-```
-
-### 4.3.4 Universal kriging
-
-```{r show_preds_u_kriging}
-
-show_prediction_map(
-  preds.u_kriging.linear,
-  title_text = "Universal Kriging (1st order)",
-  caption_text = "vgm=\"Sph\"; psill=188.709; range=13714.15; nmax=6"
-)
-
-show_prediction_map(
-  preds.u_kriging.hyperbolic,
-  title_text = "Universal Kriging (3rd order)",
-  caption_text = "vgm=\"Sph\"; psill=188.7081; range=13714.12; nmax=6"
-)
-
-```
-
-
-
-## 4.4 Calculate RMSE and Normalized RMSE (NRMSE)
-### 4.4.1 Trend surface
+## 5.2 Calculate RMSE and NRMSE for each weighted and non weighted model
+### 5.2.1 Trend surface
 
 ```{r calc_rmse_trend_surface}
 
-results.trend_surface.linear <- train(
+# Calc RMSE using SLOO-CV
+results.trend_surface.linear.best_case <- train(
   windspeed ~ x + y,
   method = "lm",
   data = sf_observations,
@@ -741,7 +578,7 @@ results.trend_surface.linear <- train(
   weights = (1 / windspeed) + 1.151302
 )
 
-results.trend_surface.hyperbolic <- train(
+results.trend_surface.hyperbolic.best_case <- train(
   windspeed ~ x + y + I(x^2) + (x * y) + I(y^2) + I(x^3) + (I(x^2) * y) + (x * I(y^2)) + I(y^3),
   method = "lm",
   data = sf_observations,
@@ -749,96 +586,115 @@ results.trend_surface.hyperbolic <- train(
   weights = (1 / windspeed) + 1.000508
 )
 
-results.trend_surface.linear.rmse <- calc_rmse(resid(results.trend_surface.linear))
-results.trend_surface.hyperbolic.rmse <- calc_rmse(resid(results.trend_surface.hyperbolic))
+results.trend_surface.linear.avg_case <- train(
+  windspeed ~ x + y,
+  method = "lm",
+  data = sf_observations,
+  trControl = trainControl(method = "LOOCV")
+)
 
-results.trend_surface.linear.nrmse <- calc_nrmse(results.trend_surface.linear.rmse, sf_observations)
-results.trend_surface.hyperbolic.nrmse <- calc_nrmse(results.trend_surface.hyperbolic.rmse, sf_observations)
+results.trend_surface.hyperbolic.avg_case <- train(
+  windspeed ~ x + y + I(x^2) + (x * y) + I(y^2) + I(x^3) + (I(x^2) * y) + (x * I(y^2)) + I(y^3),
+  method = "lm",
+  data = sf_observations,
+  trControl = trainControl(method = "LOOCV")
+)
 
-```
+# Calc NRMSE from RMSE
+results.trend_surface.linear.rmse.best_case <- calc_rmse(resid(results.trend_surface.hyperbolic.best_case))
+results.trend_surface.linear.nrmse.best_case <- calc_nrmse(results.trend_surface.linear.rmse.best_case)
 
-### 4.4.2 MQ-RBF
+results.trend_surface.hyperbolic.rmse.best_case <- calc_rmse(resid(results.trend_surface.hyperbolic.best_case))
+results.trend_surface.hyperbolic.nrmse.best_case <- calc_nrmse(results.trend_surface.hyperbolic.rmse.best_case)
 
-```{r define_cv_model_mqrbf}
+results.trend_surface.linear.rmse.avg_case <- calc_rmse(resid(results.trend_surface.linear.avg_case))
+results.trend_surface.linear.nrmse.avg_case <- calc_nrmse(results.trend_surface.linear.rmse.avg_case)
 
-train.mqrbf <- function(model){
-    
-  x_observations <- model$data$x
-  y_observations <- model$data$y
-  z_observations <- model$data$windspeed
-  alpha_seed <- model$alpha_seed
-  smoothing_factor <- model$smoothing_factor
-  
-  n <- length(x_observations)
-  residuals <- rep(0.01, n)
-  
-  for(i in 1:n) {
-    x_train <- x_observations[-i]
-    y_train <- y_observations[-i]
-    z_train <- z_observations[-i]
-    data_train <- data.frame(x = x_train, y = y_train, windspeed = z_train)
-    
-    x_new <- as.vector(x_observations[i])
-    y_new <- as.vector(y_observations[i])
-    newdata <- list(x = x_new, y = y_new)
-    
-    model <- mqrbf.calc_alpha_weights(data_train, alpha_seed, smoothing_factor)
-    
-    z_new <- predict.mqrbf(model, newdata)
-    
-    residuals[i] <- (z_observations[i] - z_new)
-  }
-  
-  return(list(residuals=residuals))
-}
+results.trend_surface.hyperbolic.rmse.avg_case <- calc_rmse(resid(results.trend_surface.hyperbolic.avg_case))
+results.trend_surface.hyperbolic.nrmse.avg_case <- calc_nrmse(results.trend_surface.hyperbolic.rmse.avg_case)
 
 ```
+
+### 5.2.2 MQ-RBF
+
 
 ```{r calc_rmse_mqrbf}
 
-results.mqrbf <- train.mqrbf(model.mqrbf)
-results.mqrbf.rmse <- calc_rmse(results.mqrbf$residuals)
-results.mqrbf.nrmse <- calc_nrmse(results.mqrbf.rmse, sf_observations)
+# Calc RMSE using SLOO-CV
+results.mqrbf.best_case <- train.mqrbf(model.mqrbf.best_case)
+results.mqrbf.avg_case <- train.mqrbf(model.mqrbf.avg_case)
+
+# Calc NRMSE from RMSE
+results.mqrbf.rmse.best_case <- calc_rmse(results.mqrbf.best_case$residuals)
+results.mqrbf.nrmse.best_case <- calc_nrmse(results.mqrbf.rmse.best_case)
+
+results.mqrbf.rmse.avg_case <- calc_rmse(results.mqrbf.avg_case$residuals)
+results.mqrbf.nrmse.avg_case <- calc_nrmse(results.mqrbf.rmse.avg_case)
 
 ```
 
-### 4.4.3 IDW
+### 5.2.3 IDW
 
 ```{r calc_rmse_idw}
 
-results.idw <- train.gstat(model.idw)
-results.idw.rmse <- calc_rmse(results.idw$residuals)
-results.idw.nrmse <- calc_nrmse(results.idw.rmse, sf_observations)
+# Calc RMSE using SLOO-CV
+results.idw.best_case <- train.gstat(model.idw.best_case)
+results.idw.avg_case <- train.gstat(model.idw.avg_case)
+
+# Calc NRMSE from RMSE
+results.idw.rmse.best_case <- calc_rmse(results.idw.best_case$residuals)
+results.idw.nrmse.best_case <- calc_nrmse(results.idw.rmse.best_case)
+
+results.idw.rmse.avg_case <- calc_rmse(results.idw.avg_case$residuals)
+results.idw.nrmse.avg_case <- calc_nrmse(results.idw.rmse.avg_case)
   
 ```
 
-### 4.4.4 Ordinary kriging
+### 5.2.4 Ordinary kriging
 
 ```{r calc_rmse_od_kriging}
 
-results.od_kriging <- train.gstat(model.od_kriging)
-results.od_kriging.rmse <- calc_rmse(results.od_kriging$residuals)
-results.od_kriging.nrmse <- calc_nrmse(results.od_kriging.rmse, sf_observations)
+# Calc RMSE using SLOO-CV
+results.od_kriging.best_case <- train.gstat(model.od_kriging.best_case)
+results.od_kriging.avg_case <- train.gstat(model.od_kriging.avg_case)
+
+# Calc NRMSE from RMSE
+results.od_kriging.rmse.best_case <- calc_rmse(results.od_kriging.best_case$residuals)
+results.od_kriging.nrmse.best_case <- calc_nrmse(results.od_kriging.rmse.best_case)
+
+results.od_kriging.rmse.avg_case <- calc_rmse(results.od_kriging.avg_case$residuals)
+results.od_kriging.nrmse.avg_case <- calc_nrmse(results.od_kriging.rmse.avg_case)
   
 ```
 
-### 4.4.4 Universal kriging
+### 5.2.5 Universal kriging
 
 ```{r calc_rmse_od_kriging}
 
-results.u_kriging.linear <- train.gstat(model.u_kriging.linear)
-results.u_kriging.hyperbolic <- train.gstat(model.u_kriging.hyperbolic)
+# Calc RMSE using SLOO-CV
+results.u_kriging.linear.best_case <- train.gstat(model.u_kriging.linear.best_case)
+results.u_kriging.hyperbolic.best_case <- train.gstat(model.u_kriging.hyperbolic.best_case)
 
-results.u_kriging.linear.rmse <- calc_rmse(results.u_kriging.linear$residuals)
-results.u_kriging.hyperbolic.rmse <- calc_rmse(results.u_kriging.hyperbolic$residuals)
+results.u_kriging.linear.avg_case <- train.gstat(model.u_kriging.linear.avg_case)
+results.u_kriging.hyperbolic.avg_case <- train.gstat(model.u_kriging.hyperbolic.avg_case)
 
-results.u_kriging.linear.nrmse <- calc_nrmse(results.u_kriging.linear.rmse, sf_observations)
-results.u_kriging.hyperbolic.nrmse <- calc_nrmse(results.u_kriging.hyperbolic.rmse, sf_observations)
+# Calc NRMSE from RMSE
+results.u_kriging.linear.rmse.best_case <- calc_rmse(results.u_kriging.linear.best_case$residuals)
+results.u_kriging.linear.nrmse.best_case <- calc_nrmse(results.u_kriging.linear.rmse.best_case)
+
+results.u_kriging.hyperbolic.rmse.best_case <- calc_rmse(results.u_kriging.hyperbolic.best_case$residuals)
+results.u_kriging.hyperbolic.nrmse.best_case <- calc_nrmse(results.u_kriging.hyperbolic.rmse.best_case)
+
+results.u_kriging.linear.rmse.avg_case <- calc_rmse(results.u_kriging.linear.avg_case$residuals)
+results.u_kriging.linear.nrmse.avg_case <- calc_nrmse(results.u_kriging.linear.rmse.avg_case)
+
+results.u_kriging.hyperbolic.rmse.avg_case <- calc_rmse(results.u_kriging.hyperbolic.avg_case$residuals)
+results.u_kriging.hyperbolic.nrmse.avg_case <- calc_nrmse(results.u_kriging.hyperbolic.rmse.avg_case)
+
   
 ```
 
-
-# 5. Conclusion
+## 5.3 Combine and show RMSE and NRMSE results of models
 
 ```{r compare_rmse_nrmse_per_model}
 
@@ -852,7 +708,7 @@ model_names <- c(
   "Universal kriging (3rd order)"
 )
 
-model_weights <- c(
+best_case_weights <- c(
   "case_weight = 1.151302",
   "case_weight = 1.000508",
   "alpha_seed = 1.166434; smoothing_factor = 90.770461",
@@ -862,38 +718,417 @@ model_weights <- c(
   "vgm=\"Sph\"; psill=188.7081; range=13714.12; nmax=6"
 )
 
-model_rmse_values <- c(
-  results.trend_surface.linear.rmse,
-  results.trend_surface.hyperbolic.rmse,
-  results.mqrbf.rmse,
-  results.idw.rmse,
-  results.od_kriging.rmse,
-  results.u_kriging.linear.rmse,
-  results.u_kriging.hyperbolic.rmse
+best_case_rmse_values <- c(
+  results.trend_surface.linear.rmse.best_case,
+  results.trend_surface.hyperbolic.rmse.best_case,
+  results.mqrbf.rmse.best_case,
+  results.idw.rmse.best_case,
+  results.od_kriging.rmse.best_case,
+  results.u_kriging.linear.rmse.best_case,
+  results.u_kriging.hyperbolic.rmse.best_case
 )
 
-model_nrmse_values <- c(
-  results.trend_surface.linear.nrmse,
-  results.trend_surface.hyperbolic.nrmse,
-  results.mqrbf.nrmse,
-  results.idw.nrmse,
-  results.od_kriging.nrmse,
-  results.u_kriging.linear.nrmse,
-  results.u_kriging.hyperbolic.nrmse
+best_case_nrmse_values <- c(
+  results.trend_surface.linear.nrmse.best_case,
+  results.trend_surface.hyperbolic.nrmse.best_case,
+  results.mqrbf.nrmse.best_case,
+  results.idw.nrmse.best_case,
+  results.od_kriging.nrmse.best_case,
+  results.u_kriging.linear.nrmse.best_case,
+  results.u_kriging.hyperbolic.nrmse.best_case
+)
+
+avg_case_rmse_values <- c(
+  results.trend_surface.linear.rmse.avg_case,
+  results.trend_surface.hyperbolic.rmse.avg_case,
+  results.mqrbf.rmse.avg_case,
+  results.idw.rmse.avg_case,
+  results.od_kriging.rmse.avg_case,
+  results.u_kriging.linear.rmse.avg_case,
+  results.u_kriging.hyperbolic.rmse.avg_case
+)
+
+avg_case_nrmse_values <- c(
+  results.trend_surface.linear.nrmse.avg_case,
+  results.trend_surface.hyperbolic.nrmse.avg_case,
+  results.mqrbf.nrmse.avg_case,
+  results.idw.nrmse.avg_case,
+  results.od_kriging.nrmse.avg_case,
+  results.u_kriging.linear.nrmse.avg_case,
+  results.u_kriging.hyperbolic.nrmse.avg_case
 )
 
 results.all_models <- 
   data.frame(
     model_name = model_names,
-    model_weight = model_weights,
-    rmse = model_rmse_values,
-    nrmse = model_nrmse_values
+    best_case_weight = best_case_weights,
+    rmse.best_case = best_case_rmse_values,
+    rmse.avg_case = avg_case_rmse_values,
+    nrmse.best_case = best_case_nrmse_values,
+    nrmse.avg_case = avg_case_nrmse_values
   )
 
 ```
 
+
+
+
+
+# 6. Compare models
+## 6.1 Show difference in RMSE and NRMSE between best case and average case models
+
 ```{r show_rmse_nrmse_results}
 
 results.all_models
+results.all_models %>% select(model_name, rmse.best_case, rmse.avg_case, nrmse.best_case, nrmse.avg_case)
 
 ```
+
+## 6.2 Generate surfaces
+
+### 6.2.1 Trend surface
+```{r trend_surface_predict}
+
+preds.trend_surface.linear.best_case <- predict(model.trend_surface.linear.best_case, sf_receptors)
+preds.trend_surface.hyperbolic.best_case <- predict(model.trend_surface.hyperbolic.best_case, sf_receptors)
+
+preds.trend_surface.linear.avg_case <- predict(model.trend_surface.linear.avg_case, sf_receptors)
+preds.trend_surface.hyperbolic.avg_case <- predict(model.trend_surface.hyperbolic.avg_case, sf_receptors)
+
+cat("\n preds.trend_surface.linear.best_case \n")
+summary(preds.trend_surface.linear.best_case)
+
+cat("\n preds.trend_surface.hyperbolic.best_case \n")
+summary(preds.trend_surface.hyperbolic.best_case)
+
+cat("\n preds.trend_surface.linear.avg_case \n")
+summary(preds.trend_surface.linear.avg_case)
+
+cat("\n preds.trend_surface.hyperbolic.avg_case \n")
+summary(preds.trend_surface.hyperbolic.avg_case)
+
+```
+
+### 6.2.2 MQ-RBF
+
+```{r mqrbf_predict}
+
+preds.mqrbf.best_case <- predict.mqrbf(model.mqrbf.best_case, sf_receptors)
+preds.mqrbf.avg_case <- predict.mqrbf(model.mqrbf.avg_case, sf_receptors)
+
+cat("\n preds.mqrbf.best_case \n")
+summary(preds.mqrbf.best_case)
+
+cat("\n preds.mqrbf.avg_case \n")
+summary(preds.mqrbf.avg_case)
+
+```
+
+### 6.2.3 IDW
+
+```{r idw_predict}
+
+preds.idw.best_case <- predict(model.idw.best_case, sf_receptors)$var1.pred
+preds.idw.avg_case <- predict(model.idw.avg_case, sf_receptors)$var1.pred
+
+cat("\n preds.idw.best_case \n")
+summary(preds.idw.best_case)
+
+cat("\n preds.idw.avg_case \n")
+summary(preds.idw.avg_case)
+
+```
+
+### 6.2.4 Ordinary kriging
+
+```{r od_kriging_predict}
+
+preds.od_kriging.best_case <- predict(model.od_kriging.best_case, sf_receptors)$var1.pred
+preds.od_kriging.avg_case <- predict(model.od_kriging.avg_case, sf_receptors)$var1.pred
+
+cat("\n preds.od_kriging.best_case \n")
+summary(preds.od_kriging.best_case)
+
+cat("\n preds.od_kriging.avg_case \n")
+summary(preds.od_kriging.avg_case)
+
+```
+
+### 6.2.5 Universal kriging
+
+```{r od_kriging_predict}
+
+preds.u_kriging.linear.best_case <- predict(model.u_kriging.linear.best_case, sf_receptors)$var1.pred
+preds.u_kriging.hyperbolic.best_case <- predict(model.u_kriging.hyperbolic.best_case, sf_receptors)$var1.pred
+
+preds.u_kriging.linear.avg_case <- predict(model.u_kriging.linear.avg_case, sf_receptors)$var1.pred
+preds.u_kriging.hyperbolic.avg_case <- predict(model.u_kriging.hyperbolic.avg_case, sf_receptors)$var1.pred
+
+cat("\n preds.u_kriging.linear.best_case \n")
+summary(preds.u_kriging.linear.best_case)
+
+cat("\n preds.u_kriging.hyperbolic.best_case \n")
+summary(preds.u_kriging.hyperbolic.best_case)
+
+cat("\n preds.u_kriging.linear.avg_case \n")
+summary(preds.u_kriging.linear.avg_case)
+
+cat("\n preds.u_kriging.hyperbolic.avg_case \n")
+summary(preds.u_kriging.hyperbolic.avg_case)
+
+```
+
+
+
+
+
+
+
+## 6.3 Show surfaces
+
+### 6.3.1 Define function to generate map plot
+
+```{r create_prediction_map}
+
+create_prediction_map <- function(observation_variables, title_text, subtitle_text, caption_text){
+
+  sf_netherlands_receptor_grid$windspeed <- 0
+  sf_netherlands_receptor_grid$windspeed <- as.factor(ceiling(observation_variables / 10))
+
+  map_plot <- ggplot() +
+    geom_sf(
+      data = sf_netherlands_receptor_grid,
+      aes(fill = windspeed)
+    ) +
+    scale_fill_grey(start = 0.1, end = 0.9) +
+    labs(
+      title = title_text, 
+      subtitle = subtitle_text, 
+      fill = "windspeed (m/s)", 
+      caption = caption_text
+    ) +
+    theme_bw() +
+    theme(legend.position = "bottom", 
+          legend.direction = "horizontal", 
+          axis.text.x=element_blank(),
+          axis.text.y=element_blank()
+    )
+  
+  return(map_plot)
+}
+
+```
+
+### 6.3.2 Generate map plots
+
+```{r create_best_case_map_plots}
+
+map_plot.trend_surface.linear.best_case <- create_prediction_map(
+  preds.trend_surface.linear.best_case,
+  title_text = "Trend surface (1st order)",
+  subtitle_text = "[best_case]",
+  caption_text = "case_weight = 1.151302"
+)
+
+map_plot.trend_surface.hyperbolic.best_case <- create_prediction_map(
+  preds.trend_surface.hyperbolic.best_case,
+  title_text = "Trend surface (1st order)",
+  subtitle_text = "[best_case]",
+  caption_text = "case_weight = 1.000508"
+)
+
+map_plot.mqrbf.best_case <- create_prediction_map(
+  preds.mqrbf.best_case,
+  title_text = "MQ-RBF",
+  subtitle_text = "[best_case]",
+  caption_text = "alpha_seed = 1.166434; smoothing_factor = 90.770461"
+)
+
+map_plot.idw.best_case <- create_prediction_map(
+  preds.idw.best_case,
+  title_text = "IDW",
+  subtitle_text = "[best_case]",
+  caption_text = "nmax=6; idp=1.028791"
+)
+
+map_plot.od_kriging.best_case <- create_prediction_map(
+  preds.od_kriging.best_case,
+  title_text = "Ordinary Kriging",
+  subtitle_text = "[best_case]",
+  caption_text = "vgm=\"Sph\"; psill=348.706182; range=40979.529490; nmax=6"
+)
+
+map_plot.u_kriging.linear.best_case <- create_prediction_map(
+  preds.u_kriging.linear.best_case,
+  title_text = "Universal Kriging (1st order)",
+  subtitle_text = "[best_case]",
+  caption_text = "vgm=\"Sph\"; psill=292.601287; range=40987.026710; nmax=6"
+)
+
+map_plot.u_kriging.hyperbolic.best_case <- create_prediction_map(
+  preds.u_kriging.hyperbolic.best_case,
+  title_text = "Universal Kriging (3rd order)",
+  subtitle_text = "[best_case]",
+  caption_text = "vgm=\"Sph\"; psill=292.665329; range=40993.430880; nmax=6"
+)
+
+```
+
+```{r create_avg_case_map_plots}
+
+map_plot.trend_surface.linear.avg_case <- create_prediction_map(
+  preds.trend_surface.linear.avg_case,
+  title_text = "Trend surface (1st order)",
+  subtitle_text = "[avg_case]",
+  caption_text = "case_weight = 1.0"
+)
+
+map_plot.trend_surface.hyperbolic.avg_case <- create_prediction_map(
+  preds.trend_surface.hyperbolic.avg_case,
+  title_text = "Trend surface (1st order)",
+  subtitle_text = "[avg_case]",
+  caption_text = "case_weight = 1.0"
+)
+
+map_plot.mqrbf.avg_case <- create_prediction_map(
+  preds.mqrbf.avg_case,
+  title_text = "MQ-RBF",
+  subtitle_text = "[avg_case]",
+  caption_text = "alpha_seed = 1.0; smoothing_factor = 0.0"
+)
+
+map_plot.idw.avg_case <- create_prediction_map(
+  preds.idw.avg_case,
+  title_text = "IDW",
+  subtitle_text = "[avg_case]",
+  caption_text = "nmax=6; idp=1.0"
+)
+
+map_plot.od_kriging.avg_case <- create_prediction_map(
+  preds.od_kriging.avg_case,
+  title_text = "Ordinary Kriging",
+  subtitle_text = "[avg_case]",
+  caption_text = "vgm=\"Sph\"; psill=348.342080; range=40943.119350; nmax=6"
+)
+
+map_plot.u_kriging.linear.avg_case <- create_prediction_map(
+  preds.u_kriging.linear.avg_case,
+  title_text = "Universal Kriging (1st order)",
+  subtitle_text = "[avg_case]",
+  caption_text = "vgm=\"Sph\"; psill=292.162214; range=40943.119350; nmax=6"
+)
+
+map_plot.u_kriging.hyperbolic.avg_case <- create_prediction_map(
+  preds.u_kriging.hyperbolic.avg_case,
+  title_text = "Universal Kriging (3rd order)",
+  subtitle_text = "[avg_case]",
+  caption_text = "vgm=\"Sph\"; psill=292.162214; range=40943.119350; nmax=6"
+)
+
+```
+
+
+
+
+### 6.3.3 Combine map plots into facets.
+
+- Create separate facets of sizes (2x1) comparing best case with average case surfaces. 
+
+```{r combine_map_plots}
+
+facet.trend_surface.linear <- arrangeGrob(
+  map_plot.trend_surface.linear.best_case, map_plot.trend_surface.linear.avg_case,
+  ncol = 2, nrow = 1
+)
+
+facet.trend_surface.hyperbolic <- arrangeGrob(
+  map_plot.trend_surface.hyperbolic.best_case, map_plot.trend_surface.hyperbolic.avg_case,
+  ncol = 2, nrow = 1
+)
+
+facet.mqrbf <- arrangeGrob(
+  map_plot.mqrbf.best_case, map_plot.mqrbf.avg_case,
+  ncol = 2, nrow = 1
+)
+
+facet.idw <- arrangeGrob(
+  map_plot.idw.best_case, map_plot.idw.avg_case,
+  ncol = 2, nrow = 1
+)
+
+facet.od_kriging <- arrangeGrob(
+  map_plot.od_kriging.best_case, map_plot.od_kriging.avg_case,
+  ncol = 2, nrow = 1
+)
+
+facet.u_kriging.linear <- arrangeGrob(
+  map_plot.u_kriging.linear.best_case, map_plot.u_kriging.linear.avg_case,
+  ncol = 2, nrow = 1
+)
+
+facet.u_kriging.hyperbolic <- arrangeGrob(
+  map_plot.u_kriging.hyperbolic.best_case, map_plot.u_kriging.hyperbolic.avg_case,
+  ncol = 2, nrow = 1
+)
+
+
+```
+
+
+### 6.3.4 Show facets with combined map plots
+
+```{r show_facet_trend_surface_linear}
+
+grid.arrange(facet.trend_surface.linear)
+
+```
+
+```{r show_facet_trend_surface_hyperbolic}
+
+grid.arrange(facet.trend_surface.hyperbolic)
+
+```
+
+```{r show_facet_mqrbf}
+
+grid.arrange(facet.mqrbf)
+
+```
+
+```{r show_facet_idw}
+
+grid.arrange(facet.idw)
+
+```
+
+```{r show_facet_od_kriging}
+
+grid.arrange(facet.od_kriging)
+
+```
+
+```{r show_facet_u_kriging_linear}
+
+grid.arrange(facet.u_kriging.linear)
+
+```
+
+```{r show_facet_u_kriging_hyperbolic}
+
+grid.arrange(facet.u_kriging.hyperbolic)
+
+```
+
+```{r show_facet_all_models}
+
+map_plot.trend_surface.linear.best_case
+map_plot.trend_surface.hyperbolic.best_case
+map_plot.mqrbf.best_case
+map_plot.idw.best_case
+map_plot.od_kriging.best_case
+map_plot.u_kriging.linear.best_case
+map_plot.u_kriging.hyperbolic.best_case
+
+```
+
+
