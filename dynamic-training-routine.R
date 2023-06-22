@@ -18,7 +18,7 @@
   setwd("C:/Users/arsal/Workspaces/thesis_project_f2")
   
   # Set random seed
-  set.seed(73829)
+  set.seed(47326)
   
   # Load data
   sf_observations <- readRDS("Data/knmi_windspeed_observations_training_set.rds")

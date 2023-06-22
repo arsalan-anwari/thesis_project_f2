@@ -14,13 +14,22 @@ knitr::opts_chunk$set(echo = TRUE)
 ## 1.1 Load libraries
 ```{r load_libs, warning=FALSE, include=FALSE}
 
-library(tidyverse)
-library(sf)
+options("rgdal_show_exportToProj4_warnings"="none")
+
+library(sf) # used to load maps and manipulate spatial features
+library(tidyverse) # used for piping functionality of data manipulation functions
+library(gstat) # used for interpolation and validation of idw and kriging models
+library(caret) # used for cross validation of other models
+library(seewave) # used to calculate surface roughness
+
+library(ggplot2)
 library(gridExtra) # to create nxn facets for ggplot
 
 library(conflicted)
 conflict_prefer("filter", "dplyr")
 conflict_prefer("lag", "dplyr")
+
+source("mqrbf-model-simple.R")
 
 
 ```
@@ -30,9 +39,12 @@ conflict_prefer("lag", "dplyr")
 
 sf_oberservations_train <- readRDS("Data/knmi_windspeed_observations_training_set.rds")
 sf_observations_anual <- readRDS("Data/knmi_windspeed_complete_set.rds")
+sf_receptors <- readRDS("Data/knmi_windspeed_receptors_training_set.rds")
 
 ls_training_results <- readRDS("Data/dynamic_training_routine_training_results_annual_avg.rds")
 ls_training_settings <- readRDS("Data/dynamic_training_routine_training_settings_annual_avg.rds")
+
+
 
 ```
 
@@ -178,8 +190,8 @@ df_training_results.u_kriging
 ```
 
 
-# 2. Analyse RMSE results of training set
 
+# 2. Analyse RMSE results of training set
 ## 2.1 Find weights with lowest RMSE per model variation for training set 
 
 ```{r find_lowest_rmse_per_variation}
@@ -288,10 +300,11 @@ grid.arrange(plot_train_results, plot_weight_effect, ncol = 2)
 
 ```
 
-# 3. Analyse spatial interpolation metrics
 
-## 3.1 Prepare dataset for different metrics
 
+
+# 3. Prepare datasets and functions for different metrics
+## 3.1 Prepare dataset
 ### 3.1.1 Seasonal set
 ```{r define_season_set_days}
 
@@ -347,7 +360,7 @@ gen_annuals_set_days <- function(){
 
   i <- 1
   for(m in 0:11){
-    for(d in 1:4){
+    for(d in 0:3){
       new_date <- start_date + months(m) + days(d)
       out[i] <- format(new_date, "%Y-%m-%d")
       i <- i + 1
@@ -375,22 +388,29 @@ sf_annual_set <- sf_observations_anual %>%
 ```{r define_random_set_days}
 
 gen_random_set_days <- function(){
-  set.seed(242534327)
+  set.seed(54353)
   
   start_date <- as.Date("2017-01-01")
   out <- rep(NA, times = 48)
 
   for(i in 1:48){
-    rand_day <- as.integer(runif(1, min=0, max=28))
+    rand_day <- as.integer(runif(1, min=6, max=24)) #make sure that no same day as annual set can be picked
     rand_month <- as.integer(runif(1, min=0, max=11))
     new_date <- start_date + months(rand_month) + days(rand_day)
+    
+    while(new_date %in% out){
+      rand_day <- as.integer(runif(1, min=6, max=24))
+      rand_month <- as.integer(runif(1, min=0, max=11))
+      new_date <- start_date + months(rand_month) + days(rand_day)
+    }
+  
     out[i] <- format(new_date, "%Y-%m-%d")
   }
 
   return(as.Date(out))
 }
 
-random_set_days <- gen_annuals_set_days()
+random_set_days <- gen_random_set_days()
 print(random_set_days)
 
 ```
@@ -398,7 +418,7 @@ print(random_set_days)
 ```{r create_random_set}
 
 sf_random_set <- sf_observations_anual %>%
-  filter( date %in% random_set_days )
+ filter( date %in% random_set_days )
 
 ```
 
@@ -437,6 +457,12 @@ gen_clustered_set_days <- function(){
     rand_day <- as.integer(runif(1, min=0, max=28))
     rand_month <- as.integer(runif(1, min=0, max=11))
     new_date <- start_date + months(rand_month) + days(rand_day)
+    
+    while(new_date %in% out){
+      rand_day <- as.integer(runif(1, min=6, max=24))
+      rand_month <- as.integer(runif(1, min=0, max=11))
+      new_date <- start_date + months(rand_month) + days(rand_day)
+    }
     
     out[i] <- format(new_date, "%Y-%m-%d")
   }
@@ -511,5 +537,773 @@ cat(sprintf(
   length(unique(sf_sparse_set$date))
 ))
 
+
+```
+
+
+## 3.2 Prepare functions
+### 3.2.1 RMSE function
+```{r define_rmse_function}
+
+rmse <- function(residuals) {
+  return(sqrt(sum((residuals)^2)/length(residuals)))
+}
+
+```
+
+### 3.2.2 SLOO-CV functions to calculate rmse
+
+```{r rmse_func_models}
+
+get_rmse.trend_surface <- function(observations, formula){
+  if(formula == "windspeed ~ x + y"){
+    case_weight <- 1.151302 
+  } else{
+    case_weight <- 1.000508
+  }
+  
+  model <- train(
+    as.formula(formula),
+    method = "lm",
+    data = observations,
+    weights = (1 / windspeed) + case_weight,
+    trControl = trainControl(method = "LOOCV")
+  )
+  
+  residuals <- resid(model)
+  
+  return( rmse(residuals) )
+  
+}
+
+get_rmse.mqrbf <- function(observations, opts = FALSE){
+  
+  model <- mqrbf(
+    data = observations, 
+    alpha_seed = 1.166434,
+    smoothing_factor = 90.770461
+  )
+  
+  resisuals <- train.mqrbf(model)$residuals
+  
+  return( rmse(resisuals) ) 
+  
+}
+
+get_rmse.idw <- function(observations, opts = FALSE){
+  
+  model <- gstat(
+    formula = windspeed ~ 1,
+    data = observations,
+    nmax = 6,
+    set = list(idp = 1.028791)
+  )
+  
+  { sink(nullfile()); cv <- gstat.cv(model, nfold = nrow(observations), verbose=FALSE); sink(); }
+  
+  residuals <- cv$residual
+  
+  return( rmse(residuals) )
+}
+
+get_rmse.kriging <- function(observations, formula){
+  if(formula == "windspeed ~ 1"){
+    weight_psill <- 0.3641014
+    weight_range <- 36.41014
+    vgm_formula <- formula
+  } else{ 
+    vgm_formula <- "windspeed ~ x + y"
+    if(formula == "windspeed ~ x + y"){
+      weight_psill <- 0.4390736
+      weight_range <- 43.90736
+    } else{
+      weight_psill <- 0.5031153
+      weight_range <- 50.31153
+    }
+  }
+  
+  kriging.vgm <- variogram(as.formula(vgm_formula), data = observations)
+  kriging.vgm.fit <- suppressWarnings(fit.variogram(kriging.vgm, vgm("Sph")))
+  
+  base_psill <-  kriging.vgm.fit$psill[1]
+  base_range <- kriging.vgm.fit$range[2]
+  new_sill <- base_psill + weight_psill
+  new_range <- base_range + weight_range
+  
+  vgm_model <- suppressWarnings(fit.variogram(
+    kriging.vgm, 
+    vgm(
+      psill = new_sill, 
+      model = "Sph", 
+      range = new_range
+    )
+  ))
+  
+  model <- suppressWarnings(gstat(
+    formula = as.formula(formula),
+    data = observations,
+    nmax = 6,
+    model = vgm_model,
+  ))
+    
+  { sink(nullfile()); cv <- gstat.cv(model, nfold = nrow(observations), verbose=FALSE); sink(); }
+  
+  residuals <- cv$residual
+  
+  return( rmse(residuals) )
+}
+
+```
+
+### 3.2.3 Prediction funtions to calculate receptor variables
+
+```{r surface_function_models}
+
+get_preds.trend_surface <- function(observations, formula){
+  if(formula == "windspeed ~ x + y"){
+    case_weight <- 1.151302 
+  } else{
+    case_weight <- 1.000508
+  }
+  
+  model <- lm(
+    as.formula(formula),
+    data = observations,
+    weights = (1 / windspeed) + case_weight
+  )
+  
+  surface <- predict(model, sf_receptors)
+  
+  return( surface )
+}
+
+get_preds.mqrbf <-  function(observations, opts = FALSE){
+  
+  model <- mqrbf(
+    data = observations, 
+    alpha_seed = 1.166434,
+    smoothing_factor = 90.770461
+  )
+  
+  surface <- predict.mqrbf(model, sf_receptors)
+  
+  return( surface )
+  
+}
+
+get_preds.idw <- function(observations, opts = FALSE){
+  
+  sink(nullfile()) # Hide dumb gstat output by forcing all output to a nullfile
+  
+  model <- gstat(
+    formula = windspeed ~ 1,
+    data = observations,
+    nmax = 6,
+    set = list(idp = 1.028791)
+  )
+  
+  surface <- predict(model, sf_receptors)$var1.pred
+  
+  sink() # Restore output to console
+  
+  return(surface)
+  
+}
+
+get_preds.kriging <- function(observations, formula){
+  
+  if(formula == "windspeed ~ 1"){
+    weight_psill <- 0.3641014
+    weight_range <- 36.41014
+    vgm_formula <- formula
+  } else{ 
+    vgm_formula <- "windspeed ~ x + y"
+    if(formula == "windspeed ~ x + y"){
+      weight_psill <- 0.4390736
+      weight_range <- 43.90736
+    } else{
+      weight_psill <- 0.5031153
+      weight_range <- 50.31153
+    }
+  }
+  
+  sink(nullfile()) # Hide dumb gstat output by forcing all output to a nullfile
+  
+  kriging.vgm <- variogram(as.formula(vgm_formula), data = observations)
+  kriging.vgm.fit <- suppressWarnings(fit.variogram(kriging.vgm, vgm("Sph")))
+  
+  base_psill <-  kriging.vgm.fit$psill[1]
+  base_range <- kriging.vgm.fit$range[2]
+  new_sill <- base_psill + weight_psill
+  new_range <- base_range + weight_range
+  
+  vgm_model <- suppressWarnings(fit.variogram(
+    kriging.vgm, 
+    vgm(
+      psill = new_sill, 
+      model = "Sph", 
+      range = new_range
+    )
+  ))
+  
+  model <- suppressWarnings(gstat(
+    formula = as.formula(formula),
+    data = observations,
+    nmax = 6,
+    model = vgm_model,
+  ))
+  
+  surface <- predict(model, sf_receptors)$var1.pred
+  
+  sink() # Restore output to console
+  
+  return(surface)
+  
+}
+  
+  
+
+```
+
+### 3.2.4 Calculate mean RMSE for given model in given time period for any set
+```{r calc_mean_rmse}
+
+calc_mean_rmse <- function(model_rmse_func, model_observations, model_rmse_func_opts){ 
+  model_rmse_results <- c()
+  for(filter_date in unique(model_observations$date)){
+    observations <- model_observations %>% filter(date == filter_date)
+    model_rmse <- model_rmse_func(observations, model_rmse_func_opts)
+    model_rmse_results <- append(model_rmse_results, model_rmse)
+  }
+  return(mean(model_rmse_results))
+}
+
+```
+
+### 3.2.5 Calculate max/med/madSR for given model for all days in random set
+```{r calc_surface_roughness}
+
+calc_surface_roughness <- function(model_pred_func, model_observations, model_pred_func_opts){ 
+  model_sr_results <- c()
+  for(filter_date in unique(model_observations$date)){
+    observations <- model_observations %>% filter(date == filter_date)
+    model_pred_result <- model_pred_func(observations, model_pred_func_opts)
+    model_pred_result <- model_pred_result / sd(model_observations$windspeed)
+    model_sr_result <- roughness(model_pred_result, std = TRUE)
+    model_sr_results <- append(model_sr_results, model_sr_result)
+  }
+  return(list(
+    max = max(model_sr_results),
+    med = median(model_sr_results),
+    mad = mad(model_sr_results)
+  ))
+}
+
+```
+
+### 3.2.6 Calculate mean surface difference for given model for all days in random set
+
+```{r calc_mean_surface_diff}
+
+calc_mean_surface_diff <- function(model_pred_func, model_observations, model_pred_func_opts){ 
+  model_pred_diff_results <- c()
+  for(filter_date in unique(model_observations$date)){
+    observations <- model_observations %>% filter(date == filter_date)
+    model_pred_result <- model_pred_func(observations, model_pred_func_opts)
+    model_pred_diff_result <- abs( max(model_pred_result) - min(model_pred_result) )
+    model_pred_diff_results <- append(model_pred_diff_results, model_pred_diff_result)
+  }
+  return(mean(model_pred_diff_results))
+}
+
+```
+
+### 3.2.7 Calculate mean surface MAD for given model for all days in random set
+```{r calc_mean_surface_mad}
+
+calc_mean_surface_mad <- function(model_pred_func, model_observations, model_pred_func_opts){ 
+  model_pred_mad_results <- c()
+  for(filter_date in unique(model_observations$date)){
+    observations <- model_observations %>% filter(date == filter_date)
+    model_pred_result <- model_pred_func(observations, model_pred_func_opts)
+    model_pred_mad_result <- mad(model_pred_result)
+    model_pred_mad_results <- append(model_pred_mad_results, model_pred_mad_result)
+  }
+  return(mean(model_pred_mad_results))
+}
+
+```
+
+
+## 3.3 Prepare model data
+### 3.3.3 Model Names 
+
+```{r define_model_names}
+
+model_names <- c(
+  "Trend surface (1st order)",
+  "Trend surface (3rd order)",
+  "MQ-RBF",
+  "IDW",
+  "Ordinary kriging",
+  "Universal kriging (1st order)",
+  "Universal kriging (3rd order)"
+)
+
+```
+
+### 3.3.4 Regresion polynomial formulas
+
+```{r define_polynomials}
+
+polynomial_formulas <- c(
+  "windspeed ~ 1",
+  "windspeed ~ x + y", 
+  "windspeed ~ x + y + I(x^2) + (x * y) + I(y^2) + I(x^3) + (I(x^2) * y) + (x * I(y^2)) + I(y^3)",
+  "windspeed ~ abs(x + y + (x^2) + (x * y) + (y^2) + (x^3) + ((x^2) * y) + (x * (y^2)) + (y^3))"
+)
+
+```
+
+
+# 4. Stability metrics
+## 4.1 Seasonal-annual variability 
+```{r define_sav}
+
+metric.stability.sav <- function(){
+  
+  get_model_score <- function(model_name, model_rmse_func, model_rmse_func_opts = FALSE){
+    
+    print(sprintf("Calculating score for model %s ....", model_name))
+    mean_rmse_annual <- calc_mean_rmse(model_rmse_func, sf_annual_set, model_rmse_func_opts)
+    
+    print("Calculating rmse for each season...")
+    score <- max(c(
+        abs( mean_rmse_annual - calc_mean_rmse(model_rmse_func, sf_seasonal_set.spring, model_rmse_func_opts) ),
+        abs( mean_rmse_annual - calc_mean_rmse(model_rmse_func, sf_seasonal_set.summer, model_rmse_func_opts) ), 
+        abs( mean_rmse_annual - calc_mean_rmse(model_rmse_func, sf_seasonal_set.autumn, model_rmse_func_opts) ), 
+        abs( mean_rmse_annual - calc_mean_rmse(model_rmse_func, sf_seasonal_set.winter, model_rmse_func_opts) ) 
+    ))
+    
+    print(sprintf("Done calculating score!"))
+    cat("\r\n")
+    
+    return(score)
+  }
+  
+  scores <-  c(
+    get_model_score(model_names[1], get_rmse.trend_surface, polynomial_formulas[2]), # 1st order trend surface
+    get_model_score(model_names[2], get_rmse.trend_surface, polynomial_formulas[3]), # 3rd order trend_surface
+    get_model_score(model_names[3], get_rmse.mqrbf),
+    get_model_score(model_names[4], get_rmse.idw),
+    get_model_score(model_names[5], get_rmse.kriging, polynomial_formulas[1]), # ordinary kriging
+    get_model_score(model_names[6], get_rmse.kriging, polynomial_formulas[2]), # 1st order universal kriging
+    get_model_score(model_names[7], get_rmse.kriging, polynomial_formulas[4]) # 3rd order universal kriging
+  )
+  
+  return( data.frame(model = model_names, score = scores) )
+    
+}
+  
+```
+
+```{r calc_sav}
+
+results.metric.stability.sav = metric.stability.sav()
+
+```
+
+```{r show_sav}
+
+results.metric.stability.sav %>% arrange(score)
+
+```
+
+## 4.2 Seasonal-seasonal variability
+
+```{r define_ssv}
+
+metric.stability.ssv <- function(){
+  
+  get_model_score <- function(model_name, model_rmse_func, model_rmse_func_opts = FALSE){
+    
+    print(sprintf("Calculating score for model %s ....", model_name))
+    
+    print("Calculating rmse for each season...")
+    scores <- c(
+        calc_mean_rmse(model_rmse_func, sf_seasonal_set.spring, model_rmse_func_opts),
+        calc_mean_rmse(model_rmse_func, sf_seasonal_set.summer, model_rmse_func_opts), 
+        calc_mean_rmse(model_rmse_func, sf_seasonal_set.autumn, model_rmse_func_opts), 
+        calc_mean_rmse(model_rmse_func, sf_seasonal_set.winter, model_rmse_func_opts)
+    )
+    
+    score <- abs( max(scores) - min(scores) )
+    
+    print(sprintf("Done calculating score!"))
+    cat("\r\n")
+    
+    return(score)
+  }
+  
+  scores <-  c(
+    get_model_score(model_names[1], get_rmse.trend_surface, polynomial_formulas[2]), # 1st order trend surface
+    get_model_score(model_names[2], get_rmse.trend_surface, polynomial_formulas[3]), # 3rd order trend_surface
+    get_model_score(model_names[3], get_rmse.mqrbf),
+    get_model_score(model_names[4], get_rmse.idw),
+    get_model_score(model_names[5], get_rmse.kriging, polynomial_formulas[1]), # ordinary kriging
+    get_model_score(model_names[6], get_rmse.kriging, polynomial_formulas[2]), # 1st order universal kriging
+    get_model_score(model_names[7], get_rmse.kriging, polynomial_formulas[4]) # 3rd order universal kriging
+  )
+  
+  return( data.frame(model = model_names, score = scores) )
+    
+}
+  
+```
+
+```{r calc_ssv}
+
+results.metric.stability.ssv <- metric.stability.ssv()
+
+```
+
+```{r show_ssv}
+
+results.metric.stability.ssv %>% arrange(score)
+
+```
+
+## 4.3 Annual random variability 
+
+```{r define_arv}
+
+metric.stability.arv <- function(){
+  
+  get_model_score <- function(model_name, model_rmse_func, model_rmse_func_opts = FALSE){
+    
+    print(sprintf("Calculating score for model %s ....", model_name))
+    
+    mean_rmse_annual <- calc_mean_rmse(model_rmse_func, sf_annual_set, model_rmse_func_opts)
+    mean_rmse_random <- calc_mean_rmse(model_rmse_func, sf_random_set, model_rmse_func_opts)
+    
+    score <- abs(mean_rmse_annual - mean_rmse_random)
+    
+    print(sprintf("Done calculating score!"))
+    cat("\r\n")
+    
+    return(score)
+  }
+  
+  scores <-  c(
+    get_model_score(model_names[1], get_rmse.trend_surface, polynomial_formulas[2]), # 1st order trend surface
+    get_model_score(model_names[2], get_rmse.trend_surface, polynomial_formulas[3]), # 3rd order trend_surface
+    get_model_score(model_names[3], get_rmse.mqrbf),
+    get_model_score(model_names[4], get_rmse.idw),
+    get_model_score(model_names[5], get_rmse.kriging, polynomial_formulas[1]), # ordinary kriging
+    get_model_score(model_names[6], get_rmse.kriging, polynomial_formulas[2]), # 1st order universal kriging
+    get_model_score(model_names[7], get_rmse.kriging, polynomial_formulas[4]) # 3rd order universal kriging
+  )
+  
+  return( data.frame(model = model_names, score = scores) )
+    
+}
+  
+```
+
+```{r calc_arv}
+
+results.metric.stability.arv <- metric.stability.arv()
+
+```
+
+```{r show_arv}
+
+results.metric.stability.arv %>% arrange(score)
+
+```
+
+## 4.4 Random-random variability 
+
+```{r define_rrv}
+
+metric.stability.rrv <- function(){
+  
+  get_model_score <- function(model_name, model_rmse_func, model_rmse_func_opts = FALSE){
+    
+    print(sprintf("Calculating score for model %s ....", model_name))
+    
+    dates <- unique(sf_random_set$date)
+    date_chunks <- split(dates, rep(1:4, length.out = length(dates)))
+    names(date_chunks) <- paste0("chunk_", 1:n)
+    
+    random_set.chunk_1 <- sf_random_set %>% filter(date %in% date_chunks$chunk_1)
+    random_set.chunk_2 <- sf_random_set %>% filter(date %in% date_chunks$chunk_2)
+    random_set.chunk_3 <- sf_random_set %>% filter(date %in% date_chunks$chunk_3)
+    random_set.chunk_4 <- sf_random_set %>% filter(date %in% date_chunks$chunk_4)
+    
+    scores <- c(
+        calc_mean_rmse(model_rmse_func, random_set.chunk_1, model_rmse_func_opts),
+        calc_mean_rmse(model_rmse_func, random_set.chunk_2, model_rmse_func_opts), 
+        calc_mean_rmse(model_rmse_func, random_set.chunk_3, model_rmse_func_opts), 
+        calc_mean_rmse(model_rmse_func, random_set.chunk_4, model_rmse_func_opts)
+    )
+    
+    score <- abs( max(scores) - min(scores) )
+    
+    print(sprintf("Done calculating score!"))
+    cat("\r\n")
+    
+    return(score)
+  }
+  
+  scores <-  c(
+    get_model_score(model_names[1], get_rmse.trend_surface, polynomial_formulas[2]), # 1st order trend surface
+    get_model_score(model_names[2], get_rmse.trend_surface, polynomial_formulas[3]), # 3rd order trend_surface
+    get_model_score(model_names[3], get_rmse.mqrbf),
+    get_model_score(model_names[4], get_rmse.idw),
+    get_model_score(model_names[5], get_rmse.kriging, polynomial_formulas[1]), # ordinary kriging
+    get_model_score(model_names[6], get_rmse.kriging, polynomial_formulas[2]), # 1st order universal kriging
+    get_model_score(model_names[7], get_rmse.kriging, polynomial_formulas[4]) # 3rd order universal kriging
+  )
+  
+  return( data.frame(model = model_names, score = scores) )
+    
+}
+  
+```
+
+```{r calc_rrv}
+
+results.metric.stability.rrv <- metric.stability.rrv()
+
+```
+
+```{r show_rrv}
+
+results.metric.stability.rrv %>% arrange(score)
+
+```
+
+## 4.5 Global-local variability 
+
+```{r define_glv}
+
+metric.stability.glv <- function(){
+  
+  get_model_score <- function(model_name, model_rmse_func, model_rmse_func_opts = FALSE){
+    
+    print(sprintf("Calculating score for model %s ....", model_name))
+    
+    mean_rmse_clustered <- calc_mean_rmse(model_rmse_func, sf_clustered_set, model_rmse_func_opts)
+    mean_rmse_sparse <- calc_mean_rmse(model_rmse_func, sf_sparse_set, model_rmse_func_opts)
+    
+    score <- abs(mean_rmse_clustered - mean_rmse_sparse)
+    
+    print(sprintf("Done calculating score!"))
+    cat("\r\n")
+    
+    return(score)
+  }
+  
+  scores <-  c(
+    get_model_score(model_names[1], get_rmse.trend_surface, polynomial_formulas[2]), # 1st order trend surface
+    get_model_score(model_names[2], get_rmse.trend_surface, polynomial_formulas[3]), # 3rd order trend_surface
+    get_model_score(model_names[3], get_rmse.mqrbf),
+    get_model_score(model_names[4], get_rmse.idw),
+    get_model_score(model_names[5], get_rmse.kriging, polynomial_formulas[1]), # ordinary kriging
+    get_model_score(model_names[6], get_rmse.kriging, polynomial_formulas[2]), # 1st order universal kriging
+    get_model_score(model_names[7], get_rmse.kriging, polynomial_formulas[4]) # 3rd order universal kriging
+  )
+  
+  return( data.frame(model = model_names, score = scores) )
+    
+}
+
+```
+
+```{r calc_glv}
+
+results.metric.stability.glv <- metric.stability.glv()
+
+```
+```{r show_glv}
+
+results.metric.stability.glv %>% arrange(score)
+
+```
+
+## 4.6 Compare results of all metrics
+
+```{r compare_stability_metric_scores}
+
+results.metric.stability.all <- results.metric.stability.sav
+colnames(results.metric.stability.all) <- c("model", "sav_score")
+
+results.metric.stability.all$ssv_score <- results.metric.stability.ssv$score
+results.metric.stability.all$arv_score <- results.metric.stability.arv$score
+results.metric.stability.all$rrv_score <- results.metric.stability.rrv$score
+results.metric.stability.all$glv_score <- results.metric.stability.glv$score
+
+results.metric.stability.all
+
+```
+
+
+
+
+# 5. Surface metrics
+
+## 5.1 Surface roughness (MaxSR, MedSR and MadSR)
+
+```{r define_max_med_mad_sr}
+
+metric.surface.sr <- function(){
+
+  max_sr_results <- c()
+  med_sr_results <- c()
+  mad_sr_results <- c()
+  
+  calc_model_score <- function(model_name, model_pred_func, model_pred_func_opts = FALSE){
+    print(sprintf("Calculating surface roughness for model %s ....", model_name))
+    results <- calc_surface_roughness(model_pred_func, sf_observations_anual, model_pred_func_opts)
+    
+    max_sr_results <<- append(max_sr_results, results$max)
+    med_sr_results <<- append(med_sr_results, results$med)
+    mad_sr_results <<- append(mad_sr_results, results$mad)
+    
+    print(sprintf("Done calculating surface roughness!"))
+    cat("\r\n")
+  }
+  
+  calc_model_score(model_names[1], get_preds.trend_surface, polynomial_formulas[2]) # 1st order trend surface
+  calc_model_score(model_names[2], get_preds.trend_surface, polynomial_formulas[3]) # 3rd order trend_surface
+  calc_model_score(model_names[3], get_preds.mqrbf)
+  calc_model_score(model_names[4], get_preds.idw)
+  calc_model_score(model_names[5], get_preds.kriging, polynomial_formulas[1]) # ordinary kriging
+  calc_model_score(model_names[6], get_preds.kriging, polynomial_formulas[2]) # 1st order universal kriging
+  calc_model_score(model_names[7], get_preds.kriging, polynomial_formulas[4]) # 3rd order universal kriging
+
+  return( data.frame(
+    model = model_names,
+    max_sr = max_sr_results,
+    med_sr = med_sr_results,
+    mad_sr = mad_sr_results
+  ))
+
+}
+
+
+```
+ 
+```{r calc_max_med_mad_sr}
+
+results.metric.surface.sr <- metric.surface.sr()
+
+```
+ 
+```{r show_max_med_mad_sr}
+
+results.metric.surface.sr %>% arrange(mad_sr)
+
+```
+
+## 5.2 Minimum maximum surface deviation
+
+```{r define_mi_ma_sd}
+
+metric.surface.mi_ma_sd <- function(){
+
+  get_model_score <- function(model_name, model_pred_func, model_pred_func_opts = FALSE){
+    print(sprintf("Calculating MiMaSD score for model %s ....", model_name))
+    
+    score <- calc_mean_surface_diff(model_pred_func, sf_observations_anual, model_pred_func_opts)
+    
+    print(sprintf("Done calculating MiMaSD score!"))
+    cat("\r\n")
+    
+    return(score)
+  }
+  
+  scores <- c(
+    get_model_score(model_names[1], get_preds.trend_surface, polynomial_formulas[2]), # 1st order trend surface
+    get_model_score(model_names[2], get_preds.trend_surface, polynomial_formulas[3]), # 3rd order trend_surface
+    get_model_score(model_names[3], get_preds.mqrbf),
+    get_model_score(model_names[4], get_preds.idw),
+    get_model_score(model_names[5], get_preds.kriging, polynomial_formulas[1]), # ordinary kriging
+    get_model_score(model_names[6], get_preds.kriging, polynomial_formulas[2]), # 1st order universal kriging
+    get_model_score(model_names[7], get_preds.kriging, polynomial_formulas[4]) # 3rd order universal kriging
+  )
+  return( data.frame(model = model_names, score = scores) )
+
+}
+
+```
+ 
+```{r calc_mi_ma_sd}
+
+results.metric.surface.mi_ma_sd <- metric.surface.mi_ma_sd()
+
+```
+
+```{r show_mi_ma_sd}
+
+results.metric.surface.mi_ma_sd %>% arrange(score)
+
+```
+ 
+ ## 5.3 MAD surface deviation
+ 
+```{r define_mad_sd}
+
+metric.surface.mad_sd <- function(){
+
+  get_model_score <- function(model_name, model_pred_func, model_pred_func_opts = FALSE){
+    print(sprintf("Calculating MadSD score for model %s ....", model_name))
+    
+    score <- calc_mean_surface_mad(model_pred_func, sf_observations_anual, model_pred_func_opts)
+    
+    print(sprintf("Done calculating MadSD score!"))
+    cat("\r\n")
+    
+    return(score)
+  }
+  
+  scores <- c(
+    get_model_score(model_names[1], get_preds.trend_surface, polynomial_formulas[2]), # 1st order trend surface
+    get_model_score(model_names[2], get_preds.trend_surface, polynomial_formulas[3]), # 3rd order trend_surface
+    get_model_score(model_names[3], get_preds.mqrbf),
+    get_model_score(model_names[4], get_preds.idw),
+    get_model_score(model_names[5], get_preds.kriging, polynomial_formulas[1]), # ordinary kriging
+    get_model_score(model_names[6], get_preds.kriging, polynomial_formulas[2]), # 1st order universal kriging
+    get_model_score(model_names[7], get_preds.kriging, polynomial_formulas[4]) # 3rd order universal kriging
+  )
+  return( data.frame(model = model_names, score = scores) )
+
+}
+
+```
+ 
+
+```{r calc_mid_sd}
+
+results.metric.surface.mad_sd <- metric.surface.mad_sd()
+
+```
+
+```{r show_mad_sd}
+
+results.metric.surface.mad_sd %>% arrange(score)
+
+```
+ 
+## 5.4 Compare results of all metrics
+```{r compare_surface_metric_scores}
+
+results.metric.surface.all <- results.metric.surface.sr
+
+results.metric.surface.all$mi_mad_sd <- results.metric.surface.mi_ma_sd$score
+results.metric.surface.all$mad_sd <- results.metric.surface.mad_sd$score
+
+results.metric.surface.all
 
 ```

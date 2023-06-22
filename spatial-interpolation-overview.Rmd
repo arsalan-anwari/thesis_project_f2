@@ -170,6 +170,7 @@ ggplot() +
 ```
 
 
+
 # 2. Observation and receptor preparation
 ## 2.1 Take single sample of knmi windspeed timeseries as observations
 
@@ -308,8 +309,10 @@ sf_observations_anual <- sf_observations_anual %>%
 
 saveRDS(sf_observations, "Data/knmi_windspeed_observations_training_set.rds")
 saveRDS(sf_observations_anual, "Data/knmi_windspeed_complete_set.rds")
+saveRDS(sf_receptors, "Data/knmi_windspeed_receptors_training_set.rds")
 
 ```
+
 
 # 3. Spatial intepolation methods
 
@@ -538,9 +541,10 @@ model.u_kriging.hyperbolic.avg_case <- gstat(
 - The syntax for the `formula` parameter is unconventional in the `gstat()` function. Exponents do not need a `I(x^n)` clause and `abs()` is used to indicate that a higher order polynomial regression model is used without auxiliary variables. To use auxiliary variables for something like co-kriging you need to remove the `abs(....)` and use `log(windspeed)`.    
 
 
-# 5. Calculate RMSE and NRMSE for each model
-## 5.1 Define helper functions 
-### 5.1.1 RMSE and NRMSE functions
+
+# 4. Calculate RMSE and NRMSE for each model
+## 4.1 Define helper functions 
+### 4.1.1 RMSE and NRMSE functions
 ```{r calc_nrmse}
 
 calc_rmse <- function(residuals) {
@@ -553,7 +557,7 @@ calc_nrmse <- function(rmse){
 
 ```
 
-### 5.1.2 Decorator for SLOO-CV crossvalidation function for models using `gstat` library
+### 4.1.2 Decorator for SLOO-CV crossvalidation function for models using `gstat` library
 ```{r train_gstat_cv}
 
 train.gstat <- function(model){
@@ -564,8 +568,8 @@ train.gstat <- function(model){
 ```
 - The `gstat.cv()` function has the tendency to output all training epochs in the terminal, making for unnecessary long knitted html files. Using `sink(nullfile())` is equivalent to piping all output of a command to `/dev/null`. This removes the output visually in the generated html file.   
 
-## 5.2 Calculate RMSE and NRMSE for each weighted and non weighted model
-### 5.2.1 Trend surface
+## 4.2 Calculate RMSE and NRMSE for each weighted and non weighted model
+### 4.2.1 Trend surface
 
 ```{r calc_rmse_trend_surface}
 
@@ -615,7 +619,7 @@ results.trend_surface.hyperbolic.nrmse.avg_case <- calc_nrmse(results.trend_surf
 
 ```
 
-### 5.2.2 MQ-RBF
+### 4.2.2 MQ-RBF
 
 
 ```{r calc_rmse_mqrbf}
@@ -633,7 +637,7 @@ results.mqrbf.nrmse.avg_case <- calc_nrmse(results.mqrbf.rmse.avg_case)
 
 ```
 
-### 5.2.3 IDW
+### 4.2.3 IDW
 
 ```{r calc_rmse_idw}
 
@@ -650,7 +654,7 @@ results.idw.nrmse.avg_case <- calc_nrmse(results.idw.rmse.avg_case)
   
 ```
 
-### 5.2.4 Ordinary kriging
+### 4.2.4 Ordinary kriging
 
 ```{r calc_rmse_od_kriging}
 
@@ -667,7 +671,7 @@ results.od_kriging.nrmse.avg_case <- calc_nrmse(results.od_kriging.rmse.avg_case
   
 ```
 
-### 5.2.5 Universal kriging
+### 4.2.5 Universal kriging
 
 ```{r calc_rmse_od_kriging}
 
@@ -694,7 +698,7 @@ results.u_kriging.hyperbolic.nrmse.avg_case <- calc_nrmse(results.u_kriging.hype
   
 ```
 
-## 5.3 Combine and show RMSE and NRMSE results of models
+## 4.3 Combine and show RMSE and NRMSE results of models
 
 ```{r compare_rmse_nrmse_per_model}
 
@@ -774,8 +778,9 @@ results.all_models <-
 
 
 
-# 6. Compare models
-## 6.1 Show difference in RMSE and NRMSE between best case and average case models
+
+# 5. Compare models
+## 5.1 Show difference in RMSE and NRMSE between best case and average case models
 
 ```{r show_rmse_nrmse_results}
 
@@ -784,9 +789,8 @@ results.all_models %>% select(model_name, rmse.best_case, rmse.avg_case, nrmse.b
 
 ```
 
-## 6.2 Generate surfaces
-
-### 6.2.1 Trend surface
+## 5.2 Generate surfaces
+### 5.2.1 Trend surface
 ```{r trend_surface_predict}
 
 preds.trend_surface.linear.best_case <- predict(model.trend_surface.linear.best_case, sf_receptors)
@@ -809,7 +813,7 @@ summary(preds.trend_surface.hyperbolic.avg_case)
 
 ```
 
-### 6.2.2 MQ-RBF
+### 5.2.2 MQ-RBF
 
 ```{r mqrbf_predict}
 
@@ -824,7 +828,7 @@ summary(preds.mqrbf.avg_case)
 
 ```
 
-### 6.2.3 IDW
+### 5.2.3 IDW
 
 ```{r idw_predict}
 
@@ -839,7 +843,7 @@ summary(preds.idw.avg_case)
 
 ```
 
-### 6.2.4 Ordinary kriging
+### 5.2.4 Ordinary kriging
 
 ```{r od_kriging_predict}
 
@@ -854,7 +858,7 @@ summary(preds.od_kriging.avg_case)
 
 ```
 
-### 6.2.5 Universal kriging
+### 5.2.5 Universal kriging
 
 ```{r od_kriging_predict}
 
@@ -883,10 +887,8 @@ summary(preds.u_kriging.hyperbolic.avg_case)
 
 
 
-
-## 6.3 Show surfaces
-
-### 6.3.1 Define function to generate map plot
+## 5.3 Show surfaces
+### 5.3.1 Define function to generate map plot
 
 ```{r create_prediction_map}
 
@@ -919,7 +921,7 @@ create_prediction_map <- function(observation_variables, title_text, subtitle_te
 
 ```
 
-### 6.3.2 Generate map plots
+### 5.3.2 Generate map plots
 
 ```{r create_best_case_map_plots}
 
@@ -1030,7 +1032,7 @@ map_plot.u_kriging.hyperbolic.avg_case <- create_prediction_map(
 
 
 
-### 6.3.3 Combine map plots into facets.
+### 5.3.3 Combine map plots into facets.
 
 - Create separate facets of sizes (2x1) comparing best case with average case surfaces. 
 
@@ -1075,7 +1077,7 @@ facet.u_kriging.hyperbolic <- arrangeGrob(
 ```
 
 
-### 6.3.4 Show facets with combined map plots
+### 5.3.4 Show facets with combined map plots
 
 ```{r show_facet_trend_surface_linear}
 
