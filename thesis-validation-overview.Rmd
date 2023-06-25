@@ -6,13 +6,18 @@ output: html_document
 ---
 
 ```{r setup, include=FALSE}
+
 knitr::opts_chunk$set(echo = TRUE)
+setwd("C:/Users/arsal/Workspaces/thesis_project_f2")
+
 ```
+
+
 
 # 1. Data preparation
 
 ## 1.1 Load libraries
-```{r load_libs, warning=FALSE, include=FALSE}
+```{r load_libs, message=FALSE, warning=FALSE, results='hide'}
 
 options("rgdal_show_exportToProj4_warnings"="none")
 
@@ -257,42 +262,37 @@ saveRDS(save.weights_with_lowest_rmse_per_opt, "Data/weights_with_lowest_rmse_pe
 
 ## 2.3 Show fluctuations of new weights and its effect on RMSE
 
-- Measurements of the IDW model where chosen as they showed the highest amount of fluctuation per model variation
+- Measurements of the OK model where chosen as they showed the highest amount of fluctuation per model variation
 
-```{r prepare_fluctuation_measurements_idw}
+```{r prepare_fluctuation_measurements_}
 
-df_idw_training_flucts <- df_training_results.idw %>%
-  select(model_opt_id, train_iteration, idp, new_rmse) %>%
-  mutate(
-    neighbors = ls_training_settings$neighbor_range[model_opt_id],
-    neighbors = as.character(neighbors)
-    ) %>%
-  rename(rmse = new_rmse)
+df_training_flucts <- df_training_results.od_kriging %>%
+  select(model_opt_id, train_iteration, new_rmse, psill) %>%
+  filter(model_opt_id == 2) %>%
+  rename(rmse = new_rmse, weight = psill)
 
-df_idw_training_flucts
+df_training_flucts
 
-summary(df_idw_training_flucts$rmse)
+summary(df_training_flucts$rmse)
 
 ```
 
 ```{r plot_fluctuation_measurements_idw}
 
-plot_train_results <- df_idw_training_flucts %>% 
-  ggplot( aes(x = train_iteration, y = rmse, fill = neighbors, linetype = factor(neighbors)) ) +
+plot_train_results <- df_training_flucts %>% 
+  ggplot( aes(x = train_iteration, y = rmse) ) +
   geom_line(position = "identity", linewidth = 0.5) +
   scale_fill_grey(start = 0.1, end = 0.9) +
-  labs(title = "Training results (IDW)", linetype = "neighbors") +
-  theme_bw() +
-  theme(legend.position = "bottom", legend.direction = "horizontal")
+  labs(title = "Training results (Ordinary kriging)", subtitle = "neighbors = 6") +
+  theme_bw()
 
-plot_weight_effect <- df_idw_training_flucts %>% 
-  ggplot( aes(x = train_iteration, y = idp, fill = neighbors, linetype = factor(neighbors)) ) +
+plot_weight_effect <- df_training_flucts %>% 
+  ggplot( aes(x = train_iteration, y = weight) ) +
   geom_line(position = "identity", linewidth = 0.5) +
   scale_y_continuous(position = "right") +
   scale_fill_grey(start = 0.1, end = 0.9) +
-  labs(title = "IDP weights (IDW)", linetype = "neighbors") +
-  theme_bw() + 
-  theme(legend.position = "bottom", legend.direction = "horizontal")
+  labs(title = "Used weights (Ordinary kriging)", subtitle = "neighbors = 6") +
+  theme_bw()
 
 
 grid.arrange(plot_train_results, plot_weight_effect, ncol = 2)
@@ -442,7 +442,10 @@ sf_sample_map %>%
     theme_void()
 
 ```
+
+
 As you can see from the plot, the following stations are in or near the province of Zeeland:
+
 	- 312, 316, 324, 331, 340, 315, 310, 313, 308, 319, 330, 343
 	
 ```{r define_clustered_set_days}
@@ -486,7 +489,8 @@ sf_clustered_set <- sf_observations_anual %>%
 	
 ### 3.1.5 Sparse set
 
-Based on the map shown in 3.1.4 the following stations where selected from the center and north of the Netherlands for the sparse set
+Based on the map shown in 3.1.4 the following stations where selected from the center and north of the Netherlands for the sparse set:
+
 - Center: 260, 269, 275, 375, 215, 240
 - North: 270, 280, 279, 273, 267, 242
 
@@ -1034,7 +1038,7 @@ metric.stability.rrv <- function(){
     
     dates <- unique(sf_random_set$date)
     date_chunks <- split(dates, rep(1:4, length.out = length(dates)))
-    names(date_chunks) <- paste0("chunk_", 1:n)
+    names(date_chunks) <- paste0("chunk_", 1:4)
     
     random_set.chunk_1 <- sf_random_set %>% filter(date %in% date_chunks$chunk_1)
     random_set.chunk_2 <- sf_random_set %>% filter(date %in% date_chunks$chunk_2)

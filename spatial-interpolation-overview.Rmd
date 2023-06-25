@@ -6,6 +6,7 @@ output: html_document
 ---
 
 ```{r setup, include=FALSE}
+
 knitr::opts_chunk$set(echo = TRUE)
 
 setwd("C:/Users/arsal/Workspaces/thesis_project_f2")
@@ -16,7 +17,9 @@ setwd("C:/Users/arsal/Workspaces/thesis_project_f2")
 # 1. Data preparation
 ## 1.1 Load libraries 
 
-```{r load_libs, warning=FALSE}
+```{r load_libs, message=FALSE, warning=FALSE, results='hide'}
+
+options("rgdal_show_exportToProj4_warnings"="none")
 
 library(jsonlite) # used for wind speed data of knmi station
 library(sf) # used to load maps and manipulate spatial features
@@ -39,7 +42,7 @@ library(caret) # used for cross validation of other models
 
 ## 1.2 Load data
 
-```{r load_data}
+```{r load_data, message=FALSE, warning=FALSE, results='hide'}
 
 # load windspeed measurements
 df_knmi_windspeed <- read_json("Data/knmi_winspeed_days_2017.json", simplifyVector = TRUE)
@@ -77,7 +80,7 @@ na_rows_stations <- df_knmi_windspeed %>%
   
 missing_knmi_stations <- unique(rbind(missing_rows_stations, na_rows_stations))
   
-missing_knmi_stations
+missing_knmi_stations$station_code
 ```
 
 ### 1.3.3 filter out rows with missing entries
@@ -85,8 +88,6 @@ missing_knmi_stations
 ```{r filter_df_windspeed}
 df_knmi_windspeed <- df_knmi_windspeed %>% 
   filter(!(station_code %in% missing_knmi_stations$station_code))
-
-df_knmi_windspeed
 
 ```
 
@@ -100,7 +101,7 @@ df_knmi_station_coords <- df_knmi_station_coords %>%
 
 df_knmi_stations <- merge(df_knmi_windspeed, df_knmi_station_coords, by = "station_code")
 
-df_knmi_stations
+head(df_knmi_stations)
 
 ```
 
@@ -186,7 +187,7 @@ sf_observations <- df_observations %>%
   st_transform(crs_source)
   
 sf_observations
-df_observations
+head(df_observations, 10)
 
 ```
 
@@ -335,6 +336,7 @@ ls_best_rmse_weights$u_kriging
 ```
  
 Based on these results best case models will use the following weights in this manner:
+
 - Linear and hyperbolic trend surface using `weights = (1/windspeed) + case_weight`
 - MQ-RBF model with an `alpha_seed = 1.166434` and `smoothing_factor = 90.770461`
 - IDW model using `nmax=6` and `idp=1.028791`
@@ -377,6 +379,8 @@ summary(model.trend_surface.hyperbolic.avg_case)
 
 ### 3.2.2 MQ-RBF
 
+- Load external R script to make notebook cleaner.
+
 ```{r mqrbf_model_load}
 
 source("mqrbf-model-simple.R")
@@ -396,8 +400,10 @@ model.mqrbf.best_case <- mqrbf(
 
 model.mqrbf.avg_case <- mqrbf(data = sf_observations)
 
+cat("\n model.mqrbf.best_case$alpha_weight \n")
 summary(model.mqrbf.best_case$alpha_weights)
-cat("\n")
+
+cat("\n model.mqrbf.avg_case$alpha_weight \n")
 summary(model.mqrbf.avg_case$alpha_weights)
 
 ```
@@ -673,7 +679,7 @@ results.od_kriging.nrmse.avg_case <- calc_nrmse(results.od_kriging.rmse.avg_case
 
 ### 4.2.5 Universal kriging
 
-```{r calc_rmse_od_kriging}
+```{r calc_rmse_u_kriging}
 
 # Calc RMSE using SLOO-CV
 results.u_kriging.linear.best_case <- train.gstat(model.u_kriging.linear.best_case)
@@ -784,7 +790,6 @@ results.all_models <-
 
 ```{r show_rmse_nrmse_results}
 
-results.all_models
 results.all_models %>% select(model_name, rmse.best_case, rmse.avg_case, nrmse.best_case, nrmse.avg_case)
 
 ```
@@ -860,7 +865,7 @@ summary(preds.od_kriging.avg_case)
 
 ### 5.2.5 Universal kriging
 
-```{r od_kriging_predict}
+```{r u_kriging_predict}
 
 preds.u_kriging.linear.best_case <- predict(model.u_kriging.linear.best_case, sf_receptors)$var1.pred
 preds.u_kriging.hyperbolic.best_case <- predict(model.u_kriging.hyperbolic.best_case, sf_receptors)$var1.pred
@@ -934,7 +939,7 @@ map_plot.trend_surface.linear.best_case <- create_prediction_map(
 
 map_plot.trend_surface.hyperbolic.best_case <- create_prediction_map(
   preds.trend_surface.hyperbolic.best_case,
-  title_text = "Trend surface (1st order)",
+  title_text = "Trend surface (3rd order)",
   subtitle_text = "[best_case]",
   caption_text = "case_weight = 1.000508"
 )
