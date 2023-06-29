@@ -24,7 +24,7 @@
     └───Docs 
     	│   [15] dynamic-training-routine.md
     	│   [16] Thesis paper.pdf
-    	│   [17] Thesis paper.pdf
+    	│   [17] Thesis poster.pdf
     	│   [18] Spatial statistics overview.pdf
     	│   [19] spatial-interpolation-overview.html
     	│   [20] thesis-validation-overview.html
