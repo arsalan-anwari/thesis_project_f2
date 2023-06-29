@@ -24,9 +24,10 @@
     └───Docs 
     	│   [15] dynamic-training-routine.md
     	│   [16] Thesis paper.pdf
-    	│   [17] Spatial statistics overview.pdf
-    	│   [18] spatial-interpolation-overview.html
-    	│   [19] thesis-validation-overview.html
+    	│   [17] Thesis paper.pdf
+    	│   [18] Spatial statistics overview.pdf
+    	│   [19] spatial-interpolation-overview.html
+    	│   [20] thesis-validation-overview.html
 ```
 
 ## Description
@@ -47,24 +48,26 @@
 
 [8]: File containing receptors as SF object.
 
-[9]: File containing BDP hyperparameters
+[9]: File containing BDP hyperparameters.
 
-[10]: File containing the settings used to calculate BDP hyperparameters
+[10]: File containing the settings used to calculate BDP hyperparameters.
 
-[11]: File containing the CRS of BRP Gewaspercelen map used as source map
+[11]: File containing the CRS of BRP Gewaspercelen map used as source map.
 
 [12]: File containing the reference map used to perform tesselation.
 
-[13]: File containing the coordinates in (WG:84) of the KNMI stations
+[13]: File containing the coordinates in (WG:84) of the KNMI stations.
 
 [14]: File containing daily weather data for windspeed of the KNMI stations in the year 2017. 
 
-[15]: Contains the documentation how to use and tweak the dynamic training routine of file [2]
+[15]: Contains the documentation how to use and tweak the dynamic training routine of file [2].
 
 [16]: Copy of thesis paper
 
-[17]: Copy of asside used in appendix of thesis paper
+[17]: Copy of thesis poster used in presentation.
 
-[18]: Knitted html file of execution in file [1]
+[18]: Copy of asside used in appendix of thesis paper.
 
-[19]: Knitted html file of execution in file [4]
+[19]: Knitted html file of execution in file [1].
+
+[20]: Knitted html file of execution in file [4]
